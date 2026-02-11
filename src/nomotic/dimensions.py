@@ -22,11 +22,31 @@ The 13 dimensions:
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from nomotic.types import Action, AgentContext, DimensionScore
+
+__all__ = [
+    "AuthorityVerification",
+    "BehavioralConsistency",
+    "CascadingImpact",
+    "DimensionRegistry",
+    "EthicalAlignment",
+    "GovernanceDimension",
+    "HumanOverride",
+    "IncidentDetection",
+    "IsolationIntegrity",
+    "PrecedentAlignment",
+    "ResourceBoundaries",
+    "ResourceLimits",
+    "ScopeCompliance",
+    "StakeholderImpact",
+    "TemporalCompliance",
+    "Transparency",
+]
 
 
 class GovernanceDimension(ABC):
@@ -168,27 +188,33 @@ class ResourceBoundaries(GovernanceDimension):
         self._action_timestamps: list[float] = []
         self._active_count: int = 0
         self._total_cost: float = 0.0
+        self._lock = threading.Lock()
 
     def record_action_start(self, cost: float = 0.0) -> None:
         import time
 
-        self._action_timestamps.append(time.time())
-        self._active_count += 1
-        self._total_cost += cost
+        with self._lock:
+            self._action_timestamps.append(time.time())
+            self._active_count += 1
+            self._total_cost += cost
 
     def record_action_end(self) -> None:
-        self._active_count = max(0, self._active_count - 1)
+        with self._lock:
+            self._active_count = max(0, self._active_count - 1)
 
     def evaluate(self, action: Action, context: AgentContext) -> DimensionScore:
         import time
 
         now = time.time()
-        # Clean old timestamps
-        cutoff = now - 60
-        self._action_timestamps = [
-            t for t in self._action_timestamps if t > cutoff
-        ]
-        rate = len(self._action_timestamps)
+        with self._lock:
+            # Clean old timestamps
+            cutoff = now - 60
+            self._action_timestamps = [
+                t for t in self._action_timestamps if t > cutoff
+            ]
+            rate = len(self._action_timestamps)
+            active_count = self._active_count
+            total_cost = self._total_cost
 
         # Rate check
         rate_ratio = rate / self._limits.max_actions_per_minute
@@ -202,14 +228,14 @@ class ResourceBoundaries(GovernanceDimension):
             )
 
         # Concurrency check
-        conc_ratio = self._active_count / self._limits.max_concurrent_actions
+        conc_ratio = active_count / self._limits.max_concurrent_actions
         if conc_ratio >= 1.0:
             return DimensionScore(
                 dimension_name=self.name,
                 score=0.0,
                 weight=self.weight,
                 veto=True,
-                reasoning=f"Concurrency limit: {self._active_count}/{self._limits.max_concurrent_actions}",
+                reasoning=f"Concurrency limit: {active_count}/{self._limits.max_concurrent_actions}",
             )
 
         # Cost check
@@ -222,7 +248,7 @@ class ResourceBoundaries(GovernanceDimension):
                 veto=True,
                 reasoning=f"Action cost {action_cost} exceeds limit {self._limits.max_cost_per_action}",
             )
-        if self._total_cost + action_cost > self._limits.max_total_cost:
+        if total_cost + action_cost > self._limits.max_total_cost:
             return DimensionScore(
                 dimension_name=self.name,
                 score=0.0,
@@ -237,7 +263,7 @@ class ResourceBoundaries(GovernanceDimension):
             dimension_name=self.name,
             score=score,
             weight=self.weight,
-            reasoning=f"Within limits (rate={rate}, concurrent={self._active_count})",
+            reasoning=f"Within limits (rate={rate}, concurrent={active_count})",
         )
 
 
@@ -258,33 +284,35 @@ class BehavioralConsistency(GovernanceDimension):
 
     def __init__(self) -> None:
         self._known_patterns: dict[str, set[str]] = {}  # agent_id -> action_types seen
+        self._lock = threading.Lock()
 
     def evaluate(self, action: Action, context: AgentContext) -> DimensionScore:
-        seen = self._known_patterns.setdefault(context.agent_id, set())
-        if not seen:
-            # First action — no baseline yet
+        with self._lock:
+            seen = self._known_patterns.setdefault(context.agent_id, set())
+            if not seen:
+                # First action — no baseline yet
+                seen.add(action.action_type)
+                return DimensionScore(
+                    dimension_name=self.name,
+                    score=0.7,
+                    weight=self.weight,
+                    reasoning="First action; establishing baseline",
+                )
+            if action.action_type in seen:
+                return DimensionScore(
+                    dimension_name=self.name,
+                    score=1.0,
+                    weight=self.weight,
+                    reasoning="Action type consistent with history",
+                )
+            # Novel action type — not a veto, but lowers confidence
             seen.add(action.action_type)
             return DimensionScore(
                 dimension_name=self.name,
-                score=0.7,
+                score=0.5,
                 weight=self.weight,
-                reasoning="First action; establishing baseline",
+                reasoning=f"Novel action type '{action.action_type}' for this agent",
             )
-        if action.action_type in seen:
-            return DimensionScore(
-                dimension_name=self.name,
-                score=1.0,
-                weight=self.weight,
-                reasoning="Action type consistent with history",
-            )
-        # Novel action type — not a veto, but lowers confidence
-        seen.add(action.action_type)
-        return DimensionScore(
-            dimension_name=self.name,
-            score=0.5,
-            weight=self.weight,
-            reasoning=f"Novel action type '{action.action_type}' for this agent",
-        )
 
 
 # --- Dimension 5: Cascading Impact ---
@@ -498,6 +526,10 @@ class TemporalCompliance(GovernanceDimension):
         self._last_execution: dict[str, float] = {}  # (agent_id, action_type) -> timestamp
 
     def set_time_window(self, action_type: str, start_hour: int, end_hour: int) -> None:
+        if not (0 <= start_hour <= 23):
+            raise ValueError(f"start_hour must be 0-23, got {start_hour}")
+        if not (0 <= end_hour <= 23):
+            raise ValueError(f"end_hour must be 0-23, got {end_hour}")
         self._time_windows[action_type] = (start_hour, end_hour)
 
     def set_min_interval(self, action_type: str, seconds: float) -> None:

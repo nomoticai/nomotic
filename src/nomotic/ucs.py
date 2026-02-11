@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from nomotic.types import AgentContext, DimensionScore, TrustProfile
 
+__all__ = ["UCSEngine"]
+
 
 class UCSEngine:
     """Computes the Unified Confidence Score from dimension evaluations."""
@@ -27,6 +29,8 @@ class UCSEngine:
                 0.0 = trust has no effect, 1.0 = trust dominates.
                 Default 0.2 means trust can shift the score by ±20%.
         """
+        if not 0.0 <= trust_influence <= 1.0:
+            raise ValueError(f"trust_influence must be between 0.0 and 1.0, got {trust_influence}")
         self.trust_influence = trust_influence
 
     def compute(

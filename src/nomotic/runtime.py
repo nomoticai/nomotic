@@ -43,6 +43,8 @@ from nomotic.tiers import TierOneGate, TierTwoEvaluator, TierThreeDeliberator
 from nomotic.interrupt import ExecutionHandle, InterruptAuthority, InterruptScope
 from nomotic.trust import TrustCalibrator, TrustConfig
 
+__all__ = ["GovernanceRuntime", "RuntimeConfig"]
+
 
 @dataclass
 class RuntimeConfig:
@@ -88,6 +90,11 @@ class GovernanceRuntime:
 
     def __init__(self, config: RuntimeConfig | None = None):
         self.config = config or RuntimeConfig()
+        if self.config.allow_threshold <= self.config.deny_threshold:
+            raise ValueError(
+                f"allow_threshold must be greater than deny_threshold, "
+                f"got allow={self.config.allow_threshold}, deny={self.config.deny_threshold}"
+            )
         self.registry = DimensionRegistry.create_default()
         self.ucs_engine = UCSEngine(trust_influence=self.config.trust_influence)
         self.tier_one = TierOneGate()

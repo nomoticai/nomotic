@@ -13,6 +13,19 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any
 
+__all__ = [
+    "Action",
+    "ActionRecord",
+    "ActionState",
+    "AgentContext",
+    "DimensionScore",
+    "GovernanceVerdict",
+    "InterruptRequest",
+    "Severity",
+    "TrustProfile",
+    "Verdict",
+]
+
 
 class Verdict(Enum):
     """The outcome of a governance evaluation."""

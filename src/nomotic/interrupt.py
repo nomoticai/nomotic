@@ -34,6 +34,13 @@ from nomotic.types import (
     Severity,
 )
 
+__all__ = [
+    "ExecutionHandle",
+    "InterruptAuthority",
+    "InterruptRecord",
+    "InterruptScope",
+]
+
 
 class InterruptScope(Enum):
     """Granularity of an interrupt."""

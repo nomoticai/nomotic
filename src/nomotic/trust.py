@@ -30,6 +30,8 @@ from nomotic.types import (
     Verdict,
 )
 
+__all__ = ["TrustCalibrator", "TrustConfig"]
+
 
 @dataclass
 class TrustConfig:
@@ -63,7 +65,24 @@ class TrustCalibrator:
 
     def __init__(self, config: TrustConfig | None = None):
         self.config = config or TrustConfig()
+        self._validate_config(self.config)
         self._profiles: dict[str, TrustProfile] = {}
+
+    @staticmethod
+    def _validate_config(config: TrustConfig) -> None:
+        if not 0.0 <= config.min_trust <= config.baseline_trust <= config.max_trust <= 1.0:
+            raise ValueError(
+                f"Trust bounds must satisfy 0 <= min_trust <= baseline_trust <= max_trust <= 1, "
+                f"got min={config.min_trust}, baseline={config.baseline_trust}, max={config.max_trust}"
+            )
+        if config.success_increment < 0:
+            raise ValueError(f"success_increment must be non-negative, got {config.success_increment}")
+        if config.violation_decrement < 0:
+            raise ValueError(f"violation_decrement must be non-negative, got {config.violation_decrement}")
+        if config.interrupt_decrement < 0:
+            raise ValueError(f"interrupt_decrement must be non-negative, got {config.interrupt_decrement}")
+        if config.decay_rate < 0:
+            raise ValueError(f"decay_rate must be non-negative, got {config.decay_rate}")
 
     def get_profile(self, agent_id: str) -> TrustProfile:
         """Get or create a trust profile for an agent."""
