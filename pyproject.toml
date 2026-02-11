@@ -6,9 +6,42 @@ build-backend = "hatchling.build"
 name = "nomotic"
 version = "0.1.0"
 description = "Runtime governance framework for agentic AI — laws for agents, enforced continuously"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = []
+authors = [
+    {name = "Chris Hood", email = "nomotic@chrishood.com"},
+]
+keywords = [
+    "ai",
+    "governance",
+    "agentic",
+    "nomotic",
+    "trust",
+    "authorization",
+    "ethics",
+    "runtime",
+    "security",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/nomoticai/nomotic"
+Repository = "https://github.com/nomoticai/nomotic"
+Issues = "https://github.com/nomoticai/nomotic/issues"
+Documentation = "https://github.com/nomoticai/nomotic/tree/main/docs"
 
 [project.optional-dependencies]
 dev = [

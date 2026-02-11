@@ -1,5 +1,7 @@
 """Nomotic: Runtime governance framework for agentic AI."""
 
+__version__ = "0.1.0"
+
 from nomotic.types import (
     Action,
     AgentContext,
