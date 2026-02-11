@@ -193,4 +193,4 @@ See [docs/architecture.md](docs/architecture.md) for the full architectural desi
 
 ## License
 
-MIT
+Apache 2.0
