@@ -15,6 +15,10 @@ from nomotic.tiers import TierOneGate, TierTwoEvaluator, TierThreeDeliberator
 from nomotic.interrupt import InterruptAuthority, InterruptScope
 from nomotic.trust import TrustCalibrator
 from nomotic.runtime import GovernanceRuntime
+from nomotic.keys import SigningKey, VerifyKey
+from nomotic.certificate import AgentCertificate, CertStatus, CertVerifyResult, LiveVerifyResult
+from nomotic.authority import CertificateAuthority
+from nomotic.store import CertificateStore, MemoryCertificateStore, FileCertificateStore
 
 __all__ = [
     "Action",
@@ -32,4 +36,14 @@ __all__ = [
     "InterruptScope",
     "TrustCalibrator",
     "GovernanceRuntime",
+    "SigningKey",
+    "VerifyKey",
+    "AgentCertificate",
+    "CertStatus",
+    "CertVerifyResult",
+    "LiveVerifyResult",
+    "CertificateAuthority",
+    "CertificateStore",
+    "MemoryCertificateStore",
+    "FileCertificateStore",
 ]

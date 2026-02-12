@@ -42,6 +42,10 @@ from nomotic.ucs import UCSEngine
 from nomotic.tiers import TierOneGate, TierTwoEvaluator, TierThreeDeliberator
 from nomotic.interrupt import ExecutionHandle, InterruptAuthority, InterruptScope
 from nomotic.trust import TrustCalibrator, TrustConfig
+from nomotic.certificate import AgentCertificate, CertStatus
+from nomotic.keys import SigningKey
+from nomotic.authority import CertificateAuthority
+from nomotic.store import MemoryCertificateStore
 
 __all__ = ["GovernanceRuntime", "RuntimeConfig"]
 
@@ -108,6 +112,10 @@ class GovernanceRuntime:
         self._action_history: dict[str, list[ActionRecord]] = {}
         self._verdicts: dict[str, GovernanceVerdict] = {}
         self._listeners: list[Callable[[GovernanceVerdict], None]] = []
+
+        # Certificate authority — initialized lazily or explicitly
+        self._ca: CertificateAuthority | None = None
+        self._cert_map: dict[str, str] = {}  # agent_id -> certificate_id
 
     def evaluate(self, action: Action, context: AgentContext) -> GovernanceVerdict:
         """Evaluate an action through the full governance pipeline.
@@ -247,6 +255,102 @@ class GovernanceRuntime:
 
     def get_trust_profile(self, agent_id: str) -> TrustProfile:
         return self.trust_calibrator.get_profile(agent_id)
+
+    # ── Certificate integration ──────────────────────────────────────
+
+    def _ensure_ca(self) -> CertificateAuthority:
+        """Lazily initialize the certificate authority."""
+        if self._ca is None:
+            sk, _vk = SigningKey.generate()
+            self._ca = CertificateAuthority(
+                issuer_id="runtime-auto",
+                signing_key=sk,
+                store=MemoryCertificateStore(),
+            )
+        return self._ca
+
+    def set_certificate_authority(self, ca: CertificateAuthority) -> None:
+        """Attach an external certificate authority to this runtime."""
+        self._ca = ca
+
+    def birth(
+        self,
+        agent_id: str,
+        archetype: str,
+        organization: str,
+        zone_path: str,
+        **opts: Any,
+    ) -> AgentCertificate:
+        """Issue a birth certificate for an agent through the runtime.
+
+        Delegates to CertificateAuthority.issue() and maps the agent_id
+        to the new certificate.
+        """
+        ca = self._ensure_ca()
+        cert, _agent_sk = ca.issue(
+            agent_id=agent_id,
+            archetype=archetype,
+            organization=organization,
+            zone_path=zone_path,
+            **opts,
+        )
+        self._cert_map[agent_id] = cert.certificate_id
+        # Sync trust: seed the trust calibrator with baseline
+        profile = self.trust_calibrator.get_profile(agent_id)
+        profile.overall_trust = cert.trust_score
+        return cert
+
+    def get_certificate(self, agent_id: str) -> AgentCertificate | None:
+        """Get the current certificate for an agent."""
+        ca = self._ensure_ca()
+        cert_id = self._cert_map.get(agent_id)
+        if cert_id is None:
+            return None
+        return ca.get(cert_id)
+
+    def evaluate_with_cert(
+        self,
+        action: Action,
+        context: AgentContext,
+        certificate_id: str | None = None,
+    ) -> GovernanceVerdict:
+        """Evaluate an action, integrating with the certificate system.
+
+        If a certificate_id is provided (or the agent has one mapped),
+        the certificate's trust score is used, its status is checked,
+        and its behavioral_age and trust_score are updated afterward.
+        """
+        ca = self._ensure_ca()
+
+        # Resolve certificate
+        cid = certificate_id or self._cert_map.get(context.agent_id)
+        cert: AgentCertificate | None = None
+        if cid:
+            cert = ca.get(cid)
+
+        if cert is not None:
+            # Verify certificate is ACTIVE
+            if cert.status != CertStatus.ACTIVE:
+                return GovernanceVerdict(
+                    action_id=action.id,
+                    verdict=Verdict.DENY,
+                    ucs=0.0,
+                    reasoning=f"certificate status is {cert.status.name}",
+                    tier=1,
+                )
+
+            # Use certificate's trust as the authoritative source
+            context.trust_profile.overall_trust = cert.trust_score
+
+        # Run the normal evaluation pipeline
+        verdict = self.evaluate(action, context)
+
+        # Update certificate post-evaluation (single store write)
+        if cert is not None:
+            new_trust = self.trust_calibrator.get_profile(context.agent_id).overall_trust
+            ca.record_action(cert.certificate_id, new_trust)
+
+        return verdict
 
     def _record_verdict(
         self, action: Action, context: AgentContext, verdict: GovernanceVerdict
