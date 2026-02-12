@@ -37,6 +37,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.scripts]
+nomotic = "nomotic.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/nomoticai/nomotic"
 Repository = "https://github.com/nomoticai/nomotic"
