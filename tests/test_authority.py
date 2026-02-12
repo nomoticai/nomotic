@@ -120,14 +120,23 @@ class TestSignatureVerification:
         assert result.issues == []
         assert result.status == CertStatus.ACTIVE
 
-    def test_verify_certificate_tampered(self):
-        """Tampered certificate should fail Level 2."""
+    def test_verify_certificate_tampered_identity(self):
+        """Tampered identity field should fail Level 2."""
         ca = _ca()
         cert, _ = ca.issue("agent-1", "arch", "org", "zone")
-        cert.trust_score = 0.99  # Tamper without re-signing
+        cert.agent_id = "imposter"  # Tamper an identity field without re-signing
         result = ca.verify_certificate(cert)
         assert not result.valid
         assert any("signature" in i for i in result.issues)
+
+    def test_verify_certificate_mutable_change_still_valid(self):
+        """Changing mutable state should NOT invalidate the issuer signature."""
+        ca = _ca()
+        cert, _ = ca.issue("agent-1", "arch", "org", "zone")
+        cert.trust_score = 0.99
+        cert.behavioral_age = 100
+        result = ca.verify_certificate(cert)
+        assert result.valid
 
     def test_verify_certificate_suspended(self):
         ca = _ca()
@@ -259,15 +268,15 @@ class TestRenewal:
         assert new.organization == old.organization
         assert new.zone_path == old.zone_path
 
-    def test_renewed_cert_starts_fresh(self):
+    def test_renewed_cert_carries_forward_reputation(self):
+        """Renewal preserves trust score and behavioral age from the old cert."""
         ca = _ca()
         old, _ = ca.issue("agent-1", "arch", "org", "zone")
-        # Modify old cert's behavioral age
         ca.increment_behavioral_age(old.certificate_id)
         ca.update_trust(old.certificate_id, 0.75)
         new, _ = ca.renew(old.certificate_id)
-        assert new.behavioral_age == 0
-        assert new.trust_score == 0.50
+        assert new.trust_score == 0.75
+        assert new.behavioral_age == 1
 
     def test_renew_nonexistent_raises(self):
         ca = _ca()
@@ -326,6 +335,24 @@ class TestTrustAndAge:
             ca.increment_behavioral_age(cert.certificate_id)
         current = ca.get(cert.certificate_id)
         assert current.behavioral_age == 10
+
+    def test_record_action_batches_trust_and_age(self):
+        ca = _ca()
+        cert, _ = ca.issue("agent-1", "arch", "org", "zone")
+        ca.record_action(cert.certificate_id, 0.65)
+        current = ca.get(cert.certificate_id)
+        assert current.trust_score == 0.65
+        assert current.behavioral_age == 1
+
+    def test_record_action_bounds_trust(self):
+        ca = _ca()
+        cert, _ = ca.issue("agent-1", "arch", "org", "zone")
+        ca.record_action(cert.certificate_id, 2.0)
+        current = ca.get(cert.certificate_id)
+        assert current.trust_score <= 0.95
+        ca.record_action(cert.certificate_id, -1.0)
+        current = ca.get(cert.certificate_id)
+        assert current.trust_score >= 0.05
 
 
 class TestLookup:

@@ -98,9 +98,28 @@ class AgentCertificate:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
     def to_signing_bytes(self) -> bytes:
-        """Bytes used for issuer signature (all fields except issuer_signature)."""
-        d = self.to_dict()
-        d.pop("issuer_signature", None)
+        """Bytes used for issuer signature — immutable identity fields only.
+
+        The signature proves *who this agent is* and *who issued it*, not
+        the agent's current behavioral state.  Mutable fields (trust_score,
+        behavioral_age, status, governance_hash) are deliberately excluded
+        so that routine state updates don't invalidate the signature.
+
+        Signed fields: certificate_id, agent_id, archetype, organization,
+        zone_path, issued_at, public_key, fingerprint, lineage, expires_at.
+        """
+        d = {
+            "agent_id": self.agent_id,
+            "archetype": self.archetype,
+            "certificate_id": self.certificate_id,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "fingerprint": self.fingerprint,
+            "issued_at": self.issued_at.isoformat(),
+            "lineage": self.lineage,
+            "organization": self.organization,
+            "public_key": base64.b64encode(self.public_key).decode("ascii"),
+            "zone_path": self.zone_path,
+        }
         return json.dumps(d, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     def to_binary(self) -> bytes:

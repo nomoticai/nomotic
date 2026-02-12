@@ -129,15 +129,42 @@ class TestCertificateSerialization:
         restored = AgentCertificate.from_binary(binary)
         assert restored.certificate_id == cert.certificate_id
 
-    def test_to_signing_bytes_excludes_signature(self):
+    def test_to_signing_bytes_only_identity_fields(self):
         cert = _make_cert()
         signing_bytes = cert.to_signing_bytes()
         d = json.loads(signing_bytes)
+        # Must include identity fields
+        assert "certificate_id" in d
+        assert "agent_id" in d
+        assert "archetype" in d
+        assert "organization" in d
+        assert "zone_path" in d
+        assert "issued_at" in d
+        assert "public_key" in d
+        assert "fingerprint" in d
+        assert "lineage" in d
+        assert "expires_at" in d
+        # Must NOT include mutable state fields
         assert "issuer_signature" not in d
+        assert "trust_score" not in d
+        assert "behavioral_age" not in d
+        assert "status" not in d
+        assert "governance_hash" not in d
 
     def test_to_signing_bytes_is_deterministic(self):
         cert = _make_cert()
         assert cert.to_signing_bytes() == cert.to_signing_bytes()
+
+    def test_to_signing_bytes_stable_across_state_changes(self):
+        """Mutable state changes must not affect the signing payload."""
+        cert = _make_cert()
+        before = cert.to_signing_bytes()
+        cert.trust_score = 0.99
+        cert.behavioral_age = 42
+        cert.status = CertStatus.SUSPENDED
+        cert.governance_hash = "changed"
+        after = cert.to_signing_bytes()
+        assert before == after
 
 
 class TestVerifyResults:

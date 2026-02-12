@@ -345,12 +345,10 @@ class GovernanceRuntime:
         # Run the normal evaluation pipeline
         verdict = self.evaluate(action, context)
 
-        # Update certificate post-evaluation
+        # Update certificate post-evaluation (single store write)
         if cert is not None:
-            ca.increment_behavioral_age(cert.certificate_id)
-            # Sync trust back to certificate
             new_trust = self.trust_calibrator.get_profile(context.agent_id).overall_trust
-            ca.update_trust(cert.certificate_id, new_trust)
+            ca.record_action(cert.certificate_id, new_trust)
 
         return verdict
 

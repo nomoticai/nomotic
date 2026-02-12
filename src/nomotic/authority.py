@@ -236,17 +236,24 @@ class CertificateAuthority:
         """Issue a new certificate linked to the old one via lineage.
 
         The old certificate is not revoked — it remains in whatever state
-        it was in. The new certificate inherits the agent_id, archetype,
-        organization, and zone_path.
+        it was in.  The new certificate inherits agent_id, archetype,
+        organization, zone_path, **trust_score**, and **behavioral_age**
+        from the old certificate so the agent's earned reputation carries
+        forward across renewals.
         """
         old = self._require(certificate_id)
-        return self.issue(
+        cert, agent_sk = self.issue(
             agent_id=old.agent_id,
             archetype=old.archetype,
             organization=old.organization,
             zone_path=old.zone_path,
             lineage=old.certificate_id,
         )
+        # Carry forward earned reputation
+        cert.trust_score = old.trust_score
+        cert.behavioral_age = old.behavioral_age
+        self._store.update(cert)
+        return cert, agent_sk
 
     def transfer_zone(
         self, certificate_id: str, new_zone_path: str
@@ -274,17 +281,36 @@ class CertificateAuthority:
     # ── Trust and behavioral age updates ─────────────────────────────
 
     def update_trust(self, certificate_id: str, new_trust: float) -> None:
-        """Update the trust score on a certificate."""
+        """Update the trust score on a certificate.
+
+        Trust is a mutable behavioral field — it is *not* part of the
+        signed identity payload, so no re-signing is needed.
+        """
         cert = self._require(certificate_id)
         cert.trust_score = max(_MIN_TRUST, min(_MAX_TRUST, new_trust))
-        cert.issuer_signature = self._signing_key.sign(cert.to_signing_bytes())
         self._store.update(cert)
 
     def increment_behavioral_age(self, certificate_id: str) -> None:
-        """Increment behavioral age by one governed action."""
+        """Increment behavioral age by one governed action.
+
+        Behavioral age is a mutable state field — it is *not* part of the
+        signed identity payload, so no re-signing is needed.
+        """
         cert = self._require(certificate_id)
         cert.behavioral_age += 1
-        cert.issuer_signature = self._signing_key.sign(cert.to_signing_bytes())
+        self._store.update(cert)
+
+    def record_action(
+        self, certificate_id: str, new_trust: float
+    ) -> None:
+        """Update trust and increment behavioral age in a single store write.
+
+        Called after each governed action to batch both mutable-state
+        updates into one operation.
+        """
+        cert = self._require(certificate_id)
+        cert.trust_score = max(_MIN_TRUST, min(_MAX_TRUST, new_trust))
+        cert.behavioral_age += 1
         self._store.update(cert)
 
     def update_governance_hash(

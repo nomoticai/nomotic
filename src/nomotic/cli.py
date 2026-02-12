@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,7 +60,6 @@ def _load_or_create_issuer(base: Path) -> tuple[SigningKey, VerifyKey, str]:
 
     # First run — generate
     sk, vk = SigningKey.generate()
-    import os
     key_path.write_bytes(sk.to_bytes())
     os.chmod(key_path, 0o600)
     pub_path.write_bytes(vk.to_bytes())
