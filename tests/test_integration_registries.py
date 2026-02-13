@@ -162,6 +162,14 @@ class TestCAWithOrgRegistry:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+class TestIssuerFingerprint:
+    def test_issuer_fingerprint_property(self) -> None:
+        sk, fp = _make_sk()
+        ca = CertificateAuthority("test", sk)
+        assert ca.issuer_fingerprint == fp
+        assert ca.issuer_fingerprint.startswith("SHA256:")
+
+
 class TestCAWithoutRegistries:
     def test_issue_without_registries_no_validation(self) -> None:
         sk, fp = _make_sk()

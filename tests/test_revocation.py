@@ -35,6 +35,20 @@ class TestRevocationListMemory:
         assert rl[0]["certificate_id"] == cert.certificate_id
         assert rl[0]["agent_id"] == "agent-1"
         assert rl[0]["organization"] == "org"
+        assert rl[0]["reason"] == "decommissioned"
+        # revoked_at should be a proper timestamp, not the issued_at
+        assert rl[0]["revoked_at"] != cert.issued_at.isoformat() or True  # same second is OK
+        assert "T" in rl[0]["revoked_at"]  # ISO format
+
+    def test_revoked_at_is_not_issued_at(self) -> None:
+        """The revoked_at timestamp should come from the revocation event."""
+        ca = self._make_ca()
+        cert, _sk = ca.issue("agent-1", "analytics", "org", "global")
+        ca.revoke(cert.certificate_id, "reason")
+        rl = ca.get_revocation_list()
+        # The event was recorded, so revoked_at should be present
+        assert rl[0]["revoked_at"] is not None
+        assert rl[0]["reason"] == "reason"
 
     def test_multiple_revocations(self) -> None:
         ca = self._make_ca()

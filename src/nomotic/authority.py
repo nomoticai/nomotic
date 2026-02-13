@@ -83,6 +83,14 @@ class CertificateAuthority:
         self._archetype_registry = archetype_registry
         self._zone_validator = zone_validator
         self._org_registry = org_registry
+        self._revocation_events: dict[str, dict[str, str]] = {}
+
+    # ── Public accessors ──────────────────────────────────────────────
+
+    @property
+    def issuer_fingerprint(self) -> str:
+        """SHA-256 fingerprint of the issuer's public verification key."""
+        return self._verify_key.fingerprint()
 
     # ── Issuance ─────────────────────────────────────────────────────
 
@@ -245,6 +253,10 @@ class CertificateAuthority:
         cert.issuer_signature = self._signing_key.sign(cert.to_signing_bytes())
         self._store.update(cert)
         self._store.move_to_revoked(certificate_id)
+        self._revocation_events[certificate_id] = {
+            "revoked_at": _utcnow().isoformat(),
+            "reason": reason,
+        }
         return cert
 
     def renew(self, certificate_id: str) -> tuple[AgentCertificate, SigningKey]:
@@ -342,16 +354,21 @@ class CertificateAuthority:
         """Return all revoked certificates as a list of dicts.
 
         Each entry contains: certificate_id, agent_id, organization,
-        revoked_at (if available), reason (if stored).
+        revoked_at, and reason.  The revocation timestamp comes from
+        the event recorded at revoke-time; if the CA was restarted
+        (and the in-memory events lost), ``revoked_at`` falls back to
+        the certificate's ``issued_at``.
         """
         revoked = self._store.list_revoked()
         result: list[dict[str, Any]] = []
         for cert in revoked:
+            event = self._revocation_events.get(cert.certificate_id, {})
             result.append({
                 "certificate_id": cert.certificate_id,
                 "agent_id": cert.agent_id,
                 "organization": cert.organization,
-                "revoked_at": cert.issued_at.isoformat(),
+                "revoked_at": event.get("revoked_at", cert.issued_at.isoformat()),
+                "reason": event.get("reason"),
             })
         return result
 
@@ -393,7 +410,7 @@ class CertificateAuthority:
                 raise ValueError(
                     f"Organization '{organization}' is {org.status.name}"
                 )
-            issuer_fp = self._verify_key.fingerprint()
+            issuer_fp = self.issuer_fingerprint
             if org.issuer_fingerprint != issuer_fp:
                 raise ValueError(
                     f"Issuer key is not authorized for organization '{organization}'"

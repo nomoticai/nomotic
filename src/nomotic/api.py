@@ -222,7 +222,7 @@ class _Handler(BaseHTTPRequestHandler):
         return 200, _json_bytes({
             "version": _VERSION,
             "issuer_id": ctx.ca.issuer_id,
-            "issuer_fingerprint": ctx.ca._verify_key.fingerprint(),
+            "issuer_fingerprint": ctx.ca.issuer_fingerprint,
             "uptime_seconds": round(time.time() - ctx.started_at, 1),
             "certificate_count": len(certs),
         })
@@ -457,7 +457,7 @@ class _Handler(BaseHTTPRequestHandler):
         name = data.get("name")
         if not name:
             return _error(400, "validation_error", "Missing 'name' field")
-        issuer_fp = ctx.ca._verify_key.fingerprint()
+        issuer_fp = ctx.ca.issuer_fingerprint
         try:
             org = ctx.org_registry.register(
                 name,
