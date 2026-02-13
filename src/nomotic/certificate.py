@@ -57,6 +57,7 @@ class AgentCertificate:
 
     certificate_id: str
     agent_id: str
+    owner: str
     archetype: str
     organization: str
     zone_path: str
@@ -87,6 +88,7 @@ class AgentCertificate:
             "issuer_signature": base64.b64encode(self.issuer_signature).decode("ascii"),
             "lineage": self.lineage,
             "organization": self.organization,
+            "owner": self.owner,
             "public_key": base64.b64encode(self.public_key).decode("ascii"),
             "status": self.status.name,
             "trust_score": self.trust_score,
@@ -105,8 +107,9 @@ class AgentCertificate:
         behavioral_age, status, governance_hash) are deliberately excluded
         so that routine state updates don't invalidate the signature.
 
-        Signed fields: certificate_id, agent_id, archetype, organization,
-        zone_path, issued_at, public_key, fingerprint, lineage, expires_at.
+        Signed fields: certificate_id, agent_id, owner, archetype,
+        organization, zone_path, issued_at, public_key, fingerprint,
+        lineage, expires_at.
         """
         d = {
             "agent_id": self.agent_id,
@@ -117,6 +120,7 @@ class AgentCertificate:
             "issued_at": self.issued_at.isoformat(),
             "lineage": self.lineage,
             "organization": self.organization,
+            "owner": self.owner,
             "public_key": base64.b64encode(self.public_key).decode("ascii"),
             "zone_path": self.zone_path,
         }
@@ -133,6 +137,7 @@ class AgentCertificate:
         return cls(
             certificate_id=d["certificate_id"],
             agent_id=d["agent_id"],
+            owner=d["owner"],
             archetype=d["archetype"],
             organization=d["organization"],
             zone_path=d["zone_path"],

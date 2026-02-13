@@ -23,9 +23,10 @@ class TestCertificateIssuance:
 
     def test_issued_cert_has_correct_fields(self):
         ca = _ca()
-        cert, _ = ca.issue("agent-1", "customer-experience", "acme", "global/us")
+        cert, _ = ca.issue("agent-1", "customer-experience", "acme", "global/us", owner="ops@acme.com")
         assert cert.certificate_id.startswith("nmc-")
         assert cert.agent_id == "agent-1"
+        assert cert.owner == "ops@acme.com"
         assert cert.archetype == "customer-experience"
         assert cert.organization == "acme"
         assert cert.zone_path == "global/us"
@@ -165,6 +166,7 @@ class TestSignatureVerification:
         fake = AgentCertificate(
             certificate_id="nmc-nonexistent",
             agent_id="ghost",
+            owner="nobody",
             archetype="arch",
             organization="org",
             zone_path="zone",
@@ -261,9 +263,10 @@ class TestRenewal:
 
     def test_renewed_cert_inherits_identity(self):
         ca = _ca()
-        old, _ = ca.issue("agent-1", "customer-experience", "acme", "global/us")
+        old, _ = ca.issue("agent-1", "customer-experience", "acme", "global/us", owner="ops@acme.com")
         new, _ = ca.renew(old.certificate_id)
         assert new.agent_id == old.agent_id
+        assert new.owner == old.owner
         assert new.archetype == old.archetype
         assert new.organization == old.organization
         assert new.zone_path == old.zone_path

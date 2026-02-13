@@ -24,6 +24,7 @@ class TestGenerateHeaders:
         _ca, cert, agent_sk = _setup()
         headers = generate_headers(cert, agent_sk, b"body")
         assert "X-Nomotic-Cert-ID" in headers
+        assert "X-Nomotic-Owner" in headers
         assert "X-Nomotic-Trust" in headers
         assert "X-Nomotic-Age" in headers
         assert "X-Nomotic-Archetype" in headers
@@ -49,6 +50,7 @@ class TestParseHeaders:
         parsed = parse_headers(headers)
         assert isinstance(parsed, CertificateHeaders)
         assert parsed.certificate_id == cert.certificate_id
+        assert parsed.owner == cert.owner
         assert parsed.trust_score == cert.trust_score
         assert parsed.behavioral_age == cert.behavioral_age
         assert parsed.archetype == cert.archetype

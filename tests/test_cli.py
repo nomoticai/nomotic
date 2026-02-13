@@ -23,6 +23,17 @@ class TestCLIArgParsing:
         assert args.org == "acme"
         assert args.zone == "global/us"
 
+    def test_birth_args_with_owner(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "birth",
+            "--agent-id", "agent-1",
+            "--owner", "ops@acme.com",
+            "--archetype", "arch",
+            "--org", "org",
+        ])
+        assert args.owner == "ops@acme.com"
+
     def test_birth_args_no_zone(self):
         parser = build_parser()
         args = parser.parse_args([
@@ -32,6 +43,7 @@ class TestCLIArgParsing:
             "--org", "org",
         ])
         assert args.zone is None
+        assert args.owner is None
 
     def test_verify_args(self):
         parser = build_parser()
@@ -103,12 +115,14 @@ class TestCLICommands:
                 "--base-dir", tmp,
                 "birth",
                 "--agent-id", "agent-1",
+                "--owner", "ops@acme.com",
                 "--archetype", "customer-experience",
                 "--org", "acme",
             ])
             captured = capsys.readouterr()
             assert "Certificate issued:" in captured.out
             assert "agent-1" in captured.out
+            assert "ops@acme.com" in captured.out
             assert "customer-experience" in captured.out
 
     def test_birth_then_verify(self, capsys):

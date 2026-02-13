@@ -114,6 +114,7 @@ def _build_registries(base: Path) -> tuple[ArchetypeRegistry, ZoneValidator, Org
 
 def _cmd_birth(args: argparse.Namespace) -> None:
     ca, store = _build_ca(args.base_dir)
+    zone_path = args.zone or "global"
     arch_reg, zone_val, _org_reg = _build_registries(args.base_dir)
 
     # Validate archetype
@@ -143,6 +144,7 @@ def _cmd_birth(args: argparse.Namespace) -> None:
         archetype=archetype,
         organization=args.org,
         zone_path=zone_path,
+        owner=args.owner or "",
     )
     # Save agent keys alongside certificate
     store.save_agent_key(cert.certificate_id, agent_sk.to_bytes())
@@ -150,6 +152,7 @@ def _cmd_birth(args: argparse.Namespace) -> None:
 
     print(f"Certificate issued: {cert.certificate_id}")
     print(f"  Agent:     {cert.agent_id}")
+    print(f"  Owner:     {cert.owner}")
     print(f"  Archetype: {cert.archetype}")
     print(f"  Org:       {cert.organization}")
     print(f"  Zone:      {cert.zone_path}")
@@ -250,6 +253,7 @@ def _cmd_reputation(args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"Reputation for {cert.certificate_id}")
     print(f"  Agent:          {cert.agent_id}")
+    print(f"  Owner:          {cert.owner}")
     print(f"  Trust Score:    {cert.trust_score}")
     print(f"  Behavioral Age: {cert.behavioral_age}")
     print(f"  Status:         {cert.status.name}")
@@ -595,6 +599,7 @@ def build_parser() -> argparse.ArgumentParser:
     # birth
     birth = sub.add_parser("birth", help="Issue a new agent certificate")
     birth.add_argument("--agent-id", required=True, help="Agent identifier")
+    birth.add_argument("--owner", default=None, help="Accountable owner of the agent")
     birth.add_argument("--archetype", required=True, help="Behavioral archetype")
     birth.add_argument("--org", required=True, help="Organization")
     birth.add_argument("--zone", default=None, help="Governance zone path")
