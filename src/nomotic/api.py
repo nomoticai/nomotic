@@ -71,6 +71,8 @@ _ORG_ACTION_RE = re.compile(r"^/v1/organizations/([a-z0-9][a-z0-9-]*[a-z0-9])/(s
 _FINGERPRINT_RE = re.compile(r"^/v1/fingerprint/(.+)$")
 _DRIFT_RE = re.compile(r"^/v1/drift/(.+)$")
 _ALERT_ACK_RE = re.compile(r"^/v1/alerts/([^/]+)/(\d+)/acknowledge$")
+_TRUST_RE = re.compile(r"^/v1/trust/([^/]+)$")
+_TRUST_TRAJECTORY_RE = re.compile(r"^/v1/trust/([^/]+)/trajectory$")
 
 
 # ── Request handler ─────────────────────────────────────────────────────
@@ -230,6 +232,15 @@ class _Handler(BaseHTTPRequestHandler):
         m = _ALERT_ACK_RE.match(path)
         if m and method == "POST":
             return self._handle_acknowledge_alert(ctx, m.group(1), int(m.group(2)))
+
+        # Trust
+        m = _TRUST_TRAJECTORY_RE.match(path)
+        if m and method == "GET":
+            return self._handle_get_trust_trajectory(ctx, m.group(1))
+
+        m = _TRUST_RE.match(path)
+        if m and method == "GET":
+            return self._handle_get_trust(ctx, m.group(1))
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -599,6 +610,58 @@ class _Handler(BaseHTTPRequestHandler):
         if not ok:
             return _error(404, "not_found", f"Alert not found: agent={agent_id}, index={index}")
         return 200, _json_bytes({"acknowledged": True})
+
+    # ── Trust ─────────────────────────────────────────────────────────
+
+    def _handle_get_trust(self, ctx: _ServerContext, agent_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Trust reports require a GovernanceRuntime")
+        profile = ctx.runtime.get_trust_profile(agent_id)
+        # Return 404 if the agent has never been evaluated (baseline profile
+        # with no actions indicates no evaluation has occurred).
+        if profile.successful_actions == 0 and profile.violation_count == 0:
+            trajectory = ctx.runtime.trust_calibrator.get_trajectory(agent_id)
+            if len(trajectory) == 0:
+                return _error(404, "not_found", f"No trust data for agent: {agent_id}")
+        report = ctx.runtime.get_trust_report(agent_id)
+        return 200, _json_bytes(report)
+
+    def _handle_get_trust_trajectory(self, ctx: _ServerContext, agent_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Trust reports require a GovernanceRuntime")
+        trajectory = ctx.runtime.trust_calibrator.get_trajectory(agent_id)
+        params = self._query_params()
+
+        events = trajectory.events
+
+        # Filter by since
+        since_str = params.get("since")
+        if since_str is not None:
+            try:
+                since = float(since_str)
+                events = [e for e in events if e.timestamp > since]
+            except ValueError:
+                pass
+
+        # Filter by source prefix
+        source_prefix = params.get("source")
+        if source_prefix is not None:
+            events = [e for e in events if e.source.startswith(source_prefix)]
+
+        # Limit
+        limit_str = params.get("limit")
+        if limit_str is not None:
+            try:
+                limit = min(int(limit_str), 500)
+                events = events[-limit:]
+            except ValueError:
+                pass
+
+        return 200, _json_bytes({
+            "agent_id": agent_id,
+            "events": [e.to_dict() for e in events],
+            "total": len(events),
+        })
 
 
 # ── Server context ──────────────────────────────────────────────────────

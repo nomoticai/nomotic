@@ -39,6 +39,7 @@ from nomotic.observer import FingerprintObserver
 from nomotic.drift import DriftCalculator, DriftScore
 from nomotic.window import SlidingWindow
 from nomotic.monitor import DriftMonitor, DriftConfig, DriftAlert
+from nomotic.trajectory import TrustTrajectory, TrustEvent
 
 __all__ = [
     "Action",
@@ -95,4 +96,6 @@ __all__ = [
     "DriftMonitor",
     "DriftConfig",
     "DriftAlert",
+    "TrustTrajectory",
+    "TrustEvent",
 ]

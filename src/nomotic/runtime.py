@@ -444,6 +444,48 @@ class GovernanceRuntime:
             return []
         return self._fingerprint_observer.get_alerts(agent_id, **kwargs)
 
+    def get_trust_trajectory(self, agent_id: str) -> Any:
+        """Get the trust trajectory for an agent."""
+        return self.trust_calibrator.get_trajectory(agent_id)
+
+    def get_trust_report(self, agent_id: str) -> dict[str, Any]:
+        """Get a comprehensive trust report for an agent.
+
+        Combines current trust, trajectory summary, fingerprint status,
+        and drift status into a single report.
+        """
+        profile = self.get_trust_profile(agent_id)
+        trajectory = self.trust_calibrator.get_trajectory(agent_id)
+
+        report: dict[str, Any] = {
+            "agent_id": agent_id,
+            "current_trust": profile.overall_trust,
+            "successful_actions": profile.successful_actions,
+            "violation_count": profile.violation_count,
+            "violation_rate": profile.violation_rate,
+            "trajectory": trajectory.summary(),
+        }
+
+        if self._fingerprint_observer is not None:
+            fp = self._fingerprint_observer.get_fingerprint(agent_id)
+            if fp is not None:
+                report["fingerprint"] = {
+                    "total_observations": fp.total_observations,
+                    "confidence": fp.confidence,
+                }
+
+            drift = self._fingerprint_observer.get_drift(agent_id)
+            if drift is not None:
+                report["drift"] = drift.to_dict()
+
+            alerts = self._fingerprint_observer.get_alerts(agent_id)
+            if alerts:
+                report["active_alerts"] = len(
+                    [a for a in alerts if not a.acknowledged]
+                )
+
+        return report
+
     def _record_verdict(
         self, action: Action, context: AgentContext, verdict: GovernanceVerdict
     ) -> None:
@@ -463,6 +505,19 @@ class GovernanceRuntime:
                 verdict=verdict.verdict,
                 archetype=archetype,
             )
+
+            # Drift-based trust adjustment (Phase 4C)
+            drift = self._fingerprint_observer.get_drift(context.agent_id)
+            if drift is not None:
+                self.trust_calibrator.apply_drift(context.agent_id, drift)
+
+                # Sync trust back to certificate
+                if cert is not None:
+                    new_trust = self.trust_calibrator.get_profile(
+                        context.agent_id
+                    ).overall_trust
+                    ca = self._ensure_ca()
+                    ca.update_trust(cert.certificate_id, new_trust)
 
         # Update context history for future evaluations
         if verdict.verdict == Verdict.DENY:
