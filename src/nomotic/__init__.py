@@ -36,6 +36,9 @@ from nomotic.middleware import NomoticGateway, GatewayConfig, GatewayResult
 from nomotic.fingerprint import BehavioralFingerprint, TemporalPattern
 from nomotic.priors import ArchetypePrior, TemporalProfile, PriorRegistry
 from nomotic.observer import FingerprintObserver
+from nomotic.drift import DriftCalculator, DriftScore
+from nomotic.window import SlidingWindow
+from nomotic.monitor import DriftMonitor, DriftConfig, DriftAlert
 
 __all__ = [
     "Action",
@@ -86,4 +89,10 @@ __all__ = [
     "TemporalProfile",
     "PriorRegistry",
     "FingerprintObserver",
+    "DriftCalculator",
+    "DriftScore",
+    "SlidingWindow",
+    "DriftMonitor",
+    "DriftConfig",
+    "DriftAlert",
 ]

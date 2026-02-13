@@ -551,12 +551,14 @@ def _cmd_hello(args: argparse.Namespace) -> None:
     print(f"  Requests: {len(request_log)} total, {_green(str(allowed))} allowed, {_red(str(denied))} denied")
 
     # Behavioral fingerprint demo
+    from nomotic.monitor import DriftConfig as _DriftConfig
     from nomotic.runtime import GovernanceRuntime, RuntimeConfig
     from nomotic.types import Action as GovAction, AgentContext as GovCtx, TrustProfile as GovTP
 
     print()
     print(_bold("  Behavioral Fingerprint:"))
-    runtime = GovernanceRuntime(config=RuntimeConfig(enable_fingerprints=True))
+    drift_cfg = _DriftConfig(window_size=15, check_interval=5, min_observations=5)
+    runtime = GovernanceRuntime(config=RuntimeConfig(enable_fingerprints=True, drift_config=drift_cfg))
     demo_actions = [
         ("read", "/api/data"),
         ("read", "/api/data"),
@@ -582,9 +584,158 @@ def _cmd_hello(args: argparse.Namespace) -> None:
         if fp.outcome_distribution:
             parts = [f"{k}={v:.0%}" for k, v in sorted(fp.outcome_distribution.items(), key=lambda x: -x[1])]
             print(f"      Outcomes: {', '.join(parts)}")
+
+    # Drift detection demo
+    print()
+    print(_bold("  Drift Detection:"))
+    print("    Building normal baseline (20 read operations)...")
+    for i in range(20):
+        action = GovAction(agent_id="hello-agent", action_type="read", target="/api/data")
+        ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
+        runtime.evaluate(action, ctx)
+
+    drift_score = runtime.get_drift("hello-agent")
+    if drift_score is not None:
+        print(f"    Baseline drift: {_green(f'{drift_score.overall:.2f}')} ({drift_score.severity})")
+    else:
+        print(f"    Baseline drift: {_green('not yet computed')}")
+
+    print("    Agent changes behavior to mass deletes on sensitive targets...")
+    # Shift behavior to mostly deletes on sensitive targets
+    drift_actions = [
+        ("delete", "/api/sensitive/data"),
+        ("delete", "/api/user/records"),
+        ("delete", "/api/config/keys"),
+        ("delete", "/api/sensitive/data"),
+        ("delete", "/api/user/records"),
+        ("delete", "/api/config/keys"),
+        ("delete", "/api/sensitive/data"),
+        ("delete", "/api/user/records"),
+        ("delete", "/api/config/keys"),
+        ("delete", "/api/sensitive/data"),
+        ("delete", "/api/user/records"),
+        ("delete", "/api/config/keys"),
+        ("delete", "/api/sensitive/data"),
+        ("delete", "/api/user/records"),
+        ("delete", "/api/config/keys"),
+    ]
+    for i, (action_type, target) in enumerate(drift_actions):
+        action = GovAction(agent_id="hello-agent", action_type=action_type, target=target)
+        ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
+        runtime.evaluate(action, ctx)
+        status = _red(action_type.upper())
+        print(f"    [{i+1:2d}] {status} {target}")
+
+    drift_score = runtime.get_drift("hello-agent")
+    if drift_score is not None:
+        sev = drift_score.severity
+        color = _red if sev in ("high", "critical") else (_yellow if sev == "moderate" else _green)
+        print()
+        print(f"    Drift detected!")
+        print(f"      Overall: {color(f'{drift_score.overall:.2f}')} ({sev})")
+        print(f"      Action:  {drift_score.action_drift:.2f}")
+        print(f"      Target:  {drift_score.target_drift:.2f}")
+        if drift_score.detail:
+            print(f"      Detail:  {drift_score.detail}")
+
+    alerts = runtime.get_drift_alerts("hello-agent")
+    if alerts:
+        print(f"    Alerts: {len(alerts)}")
+        for alert in alerts:
+            color = _red if alert.severity == "critical" else (_yellow if alert.severity == "high" else _cyan)
+            print(f"      {color(alert.severity)}: {alert.drift_score.detail}")
     print()
 
     server.shutdown()
+
+
+def _cmd_drift(args: argparse.Namespace) -> None:
+    """Show the current behavioral drift for an agent (via API)."""
+    import urllib.request
+    import urllib.error
+
+    base_url = f"http://{args.host}:{args.port}"
+    url = f"{base_url}/v1/drift/{args.agent_id}"
+
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            print(f"No drift data for agent: {args.agent_id}", file=sys.stderr)
+            sys.exit(1)
+        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+        print("Is the Nomotic API server running? (nomotic serve)", file=sys.stderr)
+        sys.exit(1)
+
+    drift = data["drift"]
+    print(f"Behavioral Drift: {data['agent_id']}")
+    print(f"  Overall:    {drift['overall']:.4f} ({drift['severity']})")
+    print(f"  Confidence: {drift['confidence']:.2f}")
+    print()
+    print("  Per-distribution:")
+    for name in ["action_drift", "target_drift", "temporal_drift", "outcome_drift"]:
+        val = drift[name]
+        bar_full = int(val * 10)
+        bar = "#" * bar_full + "." * (10 - bar_full)
+        label = name.replace("_drift", "").title()
+        print(f"    {label:10s} {val:.2f}  {bar}")
+    print()
+    if drift.get("detail"):
+        print(f"  Detail: {drift['detail']}")
+        print()
+
+    alerts = data.get("alerts", [])
+    unacked = sum(1 for a in alerts if not a.get("acknowledged"))
+    if alerts:
+        print(f"  Alerts: {unacked} unacknowledged")
+        for i, alert in enumerate(alerts):
+            ack = " (ack)" if alert.get("acknowledged") else ""
+            print(f"    [{i}] {alert['severity']}{ack} - {alert['drift_score'].get('detail', '')}")
+    print()
+
+
+def _cmd_alerts(args: argparse.Namespace) -> None:
+    """List drift alerts (via API)."""
+    import urllib.request
+    import urllib.error
+
+    base_url = f"http://{args.host}:{args.port}"
+    url = f"{base_url}/v1/alerts"
+    if args.agent_id:
+        url += f"?agent_id={args.agent_id}"
+
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+        print("Is the Nomotic API server running? (nomotic serve)", file=sys.stderr)
+        sys.exit(1)
+
+    alerts = data.get("alerts", [])
+    if args.unacknowledged:
+        alerts = [a for a in alerts if not a.get("acknowledged")]
+
+    if not alerts:
+        print("No drift alerts.")
+        return
+
+    print(f"Drift Alerts ({len(alerts)} total, {data.get('unacknowledged', 0)} unacknowledged):")
+    for i, alert in enumerate(alerts):
+        ack = " [ack]" if alert.get("acknowledged") else ""
+        agent = alert.get("agent_id", "?")
+        sev = alert.get("severity", "?")
+        detail = alert.get("drift_score", {}).get("detail", "")
+        print(f"  [{i}] {agent:20s} {sev:10s}{ack}  {detail}")
 
 
 def _cmd_fingerprint(args: argparse.Namespace) -> None:
@@ -784,6 +935,19 @@ def build_parser() -> argparse.ArgumentParser:
     fp_parser.add_argument("--host", default="127.0.0.1", help="API server host (default: 127.0.0.1)")
     fp_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
 
+    # ── drift ────────────────────────────────────────────────────
+    drift_parser = sub.add_parser("drift", help="Show behavioral drift for an agent")
+    drift_parser.add_argument("agent_id", help="Agent identifier")
+    drift_parser.add_argument("--host", default="127.0.0.1", help="API server host (default: 127.0.0.1)")
+    drift_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
+
+    # ── alerts ───────────────────────────────────────────────────
+    alerts_parser = sub.add_parser("alerts", help="List drift alerts")
+    alerts_parser.add_argument("--agent-id", default=None, help="Filter by agent ID")
+    alerts_parser.add_argument("--unacknowledged", action="store_true", help="Show only unacknowledged alerts")
+    alerts_parser.add_argument("--host", default="127.0.0.1", help="API server host (default: 127.0.0.1)")
+    alerts_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
+
     return parser
 
 
@@ -812,6 +976,8 @@ def main(argv: list[str] | None = None) -> None:
         "serve": _cmd_serve,
         "hello": _cmd_hello,
         "fingerprint": _cmd_fingerprint,
+        "drift": _cmd_drift,
+        "alerts": _cmd_alerts,
     }
 
     handler = commands.get(args.command)
