@@ -101,83 +101,100 @@ class ArchetypeDefinition:
     description: str
     category: str
     builtin: bool
+    prior_name: str | None = None  # Links to PriorRegistry for behavioral fingerprint seeding
 
 
 # ── Built-in archetypes ─────────────────────────────────────────────────
 
-BUILT_IN_ARCHETYPES: dict[str, dict[str, str]] = {
+BUILT_IN_ARCHETYPES: dict[str, dict[str, Any]] = {
     # Customer-facing
     "customer-experience": {
         "description": "Customer service, support, and interaction agents",
         "category": "customer-facing",
+        "prior_name": "customer-experience",
     },
     "sales-assistant": {
         "description": "Sales support, lead qualification, and outreach agents",
         "category": "customer-facing",
+        "prior_name": "sales-agent",
     },
     # Data and analytics
     "data-processing": {
         "description": "Data transformation, ETL, and pipeline agents",
         "category": "data",
+        "prior_name": "data-processor",
     },
     "analytics": {
         "description": "Data analysis, reporting, and insight generation agents",
         "category": "data",
+        "prior_name": "research-analyst",
     },
     # Financial
     "financial-transactions": {
         "description": "Payment processing, transfers, and financial operation agents",
         "category": "financial",
+        "prior_name": "financial-analyst",
     },
     "underwriting": {
         "description": "Risk assessment, policy evaluation, and approval agents",
         "category": "financial",
+        "prior_name": "financial-analyst",
     },
     # Operations
     "system-administration": {
         "description": "Infrastructure management, deployment, and monitoring agents",
         "category": "operations",
+        "prior_name": "operations-coordinator",
     },
     "workflow-orchestration": {
         "description": "Multi-step process coordination and task routing agents",
         "category": "operations",
+        "prior_name": "operations-coordinator",
     },
     "supply-chain": {
         "description": "Logistics, inventory, and procurement agents",
         "category": "operations",
+        "prior_name": "operations-coordinator",
     },
     # Content
     "content-generation": {
         "description": "Text, media, and document creation agents",
         "category": "content",
+        "prior_name": "content-creator",
     },
     "content-moderation": {
         "description": "Content review, filtering, and compliance agents",
         "category": "content",
+        "prior_name": "security-monitor",
     },
     # Security and compliance
     "security-monitoring": {
         "description": "Threat detection, incident response, and security audit agents",
         "category": "security",
+        "prior_name": "security-monitor",
     },
     "compliance-audit": {
         "description": "Regulatory compliance checking and reporting agents",
         "category": "security",
+        "prior_name": "security-monitor",
     },
     # Healthcare
     "clinical-support": {
         "description": "Clinical decision support and care coordination agents",
         "category": "healthcare",
+        "prior_name": "healthcare-agent",
     },
     # Research
     "research-assistant": {
         "description": "Literature review, data gathering, and research support agents",
         "category": "research",
+        "prior_name": "research-analyst",
     },
     # General
     "general-purpose": {
         "description": "Unspecialized agents or agents awaiting archetype assignment",
         "category": "general",
+        "prior_name": None,
     },
 }
 
@@ -214,6 +231,7 @@ class ArchetypeRegistry:
                 description=info["description"],
                 category=info["category"],
                 builtin=True,
+                prior_name=info.get("prior_name"),
             )
         return registry
 

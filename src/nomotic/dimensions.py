@@ -276,6 +276,11 @@ class BehavioralConsistency(GovernanceDimension):
     Compares the action against the agent's established behavioral profile.
     Sudden deviations — new action types, unusual targets, parameter
     anomalies — lower the score.
+
+    When a behavioral fingerprint is available (from the fingerprint
+    observer), the evaluation checks against the fingerprint's action
+    distribution for richer scoring.  Without a fingerprint, falls back
+    to the legacy "have I seen this action type before?" check.
     """
 
     name = "behavioral_consistency"
@@ -284,13 +289,25 @@ class BehavioralConsistency(GovernanceDimension):
 
     def __init__(self) -> None:
         self._known_patterns: dict[str, set[str]] = {}  # agent_id -> action_types seen
+        self._fingerprint_accessor: Callable[[str], Any] | None = None
         self._lock = threading.Lock()
+
+    def set_fingerprint_accessor(
+        self, accessor: Callable[[str], Any],
+    ) -> None:
+        """Set a function that retrieves fingerprints for agents.
+
+        Called by the runtime during initialization to wire up
+        fingerprint access without circular imports.
+        """
+        self._fingerprint_accessor = accessor
 
     def evaluate(self, action: Action, context: AgentContext) -> DimensionScore:
         with self._lock:
             seen = self._known_patterns.setdefault(context.agent_id, set())
+
+            # Legacy behavior: check if action type has been seen
             if not seen:
-                # First action — no baseline yet
                 seen.add(action.action_type)
                 return DimensionScore(
                     dimension_name=self.name,
@@ -298,21 +315,74 @@ class BehavioralConsistency(GovernanceDimension):
                     weight=self.weight,
                     reasoning="First action; establishing baseline",
                 )
-            if action.action_type in seen:
+
+            is_novel = action.action_type not in seen
+            seen.add(action.action_type)
+
+            # If no fingerprint accessor, fall back to legacy behavior
+            if self._fingerprint_accessor is None:
+                if is_novel:
+                    return DimensionScore(
+                        dimension_name=self.name,
+                        score=0.5,
+                        weight=self.weight,
+                        reasoning=f"Novel action type '{action.action_type}' for this agent",
+                    )
                 return DimensionScore(
                     dimension_name=self.name,
                     score=1.0,
                     weight=self.weight,
                     reasoning="Action type consistent with history",
                 )
-            # Novel action type — not a veto, but lowers confidence
-            seen.add(action.action_type)
-            return DimensionScore(
-                dimension_name=self.name,
-                score=0.5,
-                weight=self.weight,
-                reasoning=f"Novel action type '{action.action_type}' for this agent",
-            )
+
+            # Enhanced behavior: check against fingerprint distribution
+            fp = self._fingerprint_accessor(context.agent_id)
+            if fp is None or fp.total_observations < 10:
+                # Not enough data — fall back to legacy
+                if is_novel:
+                    return DimensionScore(
+                        dimension_name=self.name,
+                        score=0.5,
+                        weight=self.weight,
+                        reasoning=f"Novel action type '{action.action_type}' (insufficient fingerprint data)",
+                    )
+                return DimensionScore(
+                    dimension_name=self.name,
+                    score=1.0,
+                    weight=self.weight,
+                    reasoning="Action type consistent with history",
+                )
+
+            # Check if this action type exists in the fingerprint's distribution
+            expected_freq = fp.action_distribution.get(action.action_type, 0.0)
+
+            if expected_freq >= 0.05:
+                # This is a normal action type (>= 5% of typical activity)
+                return DimensionScore(
+                    dimension_name=self.name,
+                    score=1.0,
+                    weight=self.weight,
+                    confidence=fp.confidence,
+                    reasoning=f"Action type '{action.action_type}' is {expected_freq:.0%} of typical activity",
+                )
+            elif expected_freq > 0:
+                # Rare but observed — mild concern
+                return DimensionScore(
+                    dimension_name=self.name,
+                    score=0.7,
+                    weight=self.weight,
+                    confidence=fp.confidence,
+                    reasoning=f"Action type '{action.action_type}' is rare ({expected_freq:.1%} of typical activity)",
+                )
+            else:
+                # Never seen in fingerprint — moderate concern
+                return DimensionScore(
+                    dimension_name=self.name,
+                    score=0.4,
+                    weight=self.weight,
+                    confidence=fp.confidence,
+                    reasoning=f"Action type '{action.action_type}' has no precedent in behavioral fingerprint",
+                )
 
 
 # --- Dimension 5: Cascading Impact ---

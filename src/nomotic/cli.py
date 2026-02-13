@@ -549,9 +549,99 @@ def _cmd_hello(args: argparse.Namespace) -> None:
     denied = len(request_log) - allowed
     print()
     print(f"  Requests: {len(request_log)} total, {_green(str(allowed))} allowed, {_red(str(denied))} denied")
+
+    # Behavioral fingerprint demo
+    from nomotic.runtime import GovernanceRuntime, RuntimeConfig
+    from nomotic.types import Action as GovAction, AgentContext as GovCtx, TrustProfile as GovTP
+
+    print()
+    print(_bold("  Behavioral Fingerprint:"))
+    runtime = GovernanceRuntime(config=RuntimeConfig(enable_fingerprints=True))
+    demo_actions = [
+        ("read", "/api/data"),
+        ("read", "/api/data"),
+        ("read", "/api/users"),
+        ("write", "/api/data"),
+        ("read", "/api/data"),
+    ]
+    for action_type, target in demo_actions:
+        action = GovAction(agent_id="hello-agent", action_type=action_type, target=target)
+        ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
+        runtime.evaluate(action, ctx)
+
+    fp = runtime.get_fingerprint("hello-agent")
+    if fp is not None:
+        obs = fp.total_observations
+        print(f"    After {obs} governance evaluations:")
+        if fp.action_distribution:
+            parts = [f"{k}={v:.0%}" for k, v in sorted(fp.action_distribution.items(), key=lambda x: -x[1])]
+            print(f"      Actions:  {', '.join(parts)}  (confidence: {fp.confidence:.2f})")
+        if fp.target_distribution:
+            parts = [f"{k}={v:.0%}" for k, v in sorted(fp.target_distribution.items(), key=lambda x: -x[1])]
+            print(f"      Targets:  {', '.join(parts)}")
+        if fp.outcome_distribution:
+            parts = [f"{k}={v:.0%}" for k, v in sorted(fp.outcome_distribution.items(), key=lambda x: -x[1])]
+            print(f"      Outcomes: {', '.join(parts)}")
     print()
 
     server.shutdown()
+
+
+def _cmd_fingerprint(args: argparse.Namespace) -> None:
+    """Show the behavioral fingerprint for an agent (via API)."""
+    import urllib.request
+    import urllib.error
+
+    base_url = f"http://{args.host}:{args.port}"
+    url = f"{base_url}/v1/fingerprint/{args.agent_id}"
+
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            print(f"No fingerprint found for agent: {args.agent_id}", file=sys.stderr)
+            sys.exit(1)
+        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+        print("Is the Nomotic API server running? (nomotic serve)", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Behavioral Fingerprint for {data['agent_id']}")
+    print(f"  Observations: {data['total_observations']}")
+    print(f"  Confidence:   {data['confidence']:.3f}")
+    print()
+
+    if data.get("action_distribution"):
+        print("  Action Distribution:")
+        for action_type, freq in sorted(data["action_distribution"].items(), key=lambda x: -x[1]):
+            bar = "#" * int(freq * 40)
+            print(f"    {action_type:20s} {freq:6.1%} {bar}")
+        print()
+
+    if data.get("target_distribution"):
+        print("  Target Distribution:")
+        for target, freq in sorted(data["target_distribution"].items(), key=lambda x: -x[1]):
+            bar = "#" * int(freq * 40)
+            print(f"    {target:20s} {freq:6.1%} {bar}")
+        print()
+
+    tp = data.get("temporal_pattern", {})
+    if tp.get("active_hours"):
+        print(f"  Temporal Pattern:")
+        print(f"    Active hours: {tp['active_hours']}")
+        print(f"    Rate: {tp.get('actions_per_hour_mean', 0):.1f} +/- {tp.get('actions_per_hour_std', 0):.1f} actions/hr")
+        print()
+
+    if data.get("outcome_distribution"):
+        print("  Outcome Distribution:")
+        for outcome, freq in sorted(data["outcome_distribution"].items(), key=lambda x: -x[1]):
+            bar = "#" * int(freq * 40)
+            print(f"    {outcome:20s} {freq:6.1%} {bar}")
+        print()
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
@@ -688,6 +778,12 @@ def build_parser() -> argparse.ArgumentParser:
     # ── hello ────────────────────────────────────────────────────────
     sub.add_parser("hello", help="Run the hello-nomo governance demo (in-memory)")
 
+    # ── fingerprint ─────────────────────────────────────────────────
+    fp_parser = sub.add_parser("fingerprint", help="Show behavioral fingerprint for an agent")
+    fp_parser.add_argument("agent_id", help="Agent identifier")
+    fp_parser.add_argument("--host", default="127.0.0.1", help="API server host (default: 127.0.0.1)")
+    fp_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
+
     return parser
 
 
@@ -715,6 +811,7 @@ def main(argv: list[str] | None = None) -> None:
         "zone": _cmd_zone,
         "serve": _cmd_serve,
         "hello": _cmd_hello,
+        "fingerprint": _cmd_fingerprint,
     }
 
     handler = commands.get(args.command)
