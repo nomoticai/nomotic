@@ -86,11 +86,12 @@ def _build_ca(base: Path) -> tuple[CertificateAuthority, FileCertificateStore]:
 
 def _cmd_birth(args: argparse.Namespace) -> None:
     ca, store = _build_ca(args.base_dir)
+    zone_path = args.zone or "global"
     cert, agent_sk = ca.issue(
         agent_id=args.agent_id,
         archetype=args.archetype,
         organization=args.org,
-        zone_path=args.zone or "global",
+        zone_path=zone_path,
         owner=args.owner or "",
     )
     # Save agent keys alongside certificate
