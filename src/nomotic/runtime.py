@@ -23,6 +23,7 @@ that happens throughout execution. The runtime ensures this.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -64,6 +65,9 @@ class RuntimeConfig:
     drift_config: Any = None
     """Optional :class:`DriftConfig`.  If ``None``, uses DriftConfig defaults.
     Passed to :class:`FingerprintObserver`."""
+    enable_audit: bool = True
+    audit_max_records: int = 10000
+    provenance_max_records: int = 5000
 
 
 class GovernanceRuntime:
@@ -139,6 +143,25 @@ class GovernanceRuntime:
             incident = self.registry.get("incident_detection")
             if incident is not None:
                 incident.set_drift_accessor(self._fingerprint_observer.get_drift)
+
+        # Audit trail (Phase 5)
+        if self.config.enable_audit:
+            from nomotic.audit import AuditTrail
+            from nomotic.provenance import ProvenanceLog
+            from nomotic.accountability import OwnerActivityLog, UserActivityTracker
+            self._audit_trail: AuditTrail | None = AuditTrail(
+                max_records=self.config.audit_max_records,
+            )
+            self._provenance_log: ProvenanceLog | None = ProvenanceLog(
+                max_records=self.config.provenance_max_records,
+            )
+            self._owner_activity: OwnerActivityLog | None = OwnerActivityLog()
+            self._user_tracker: UserActivityTracker | None = UserActivityTracker()
+        else:
+            self._audit_trail = None
+            self._provenance_log = None
+            self._owner_activity = None
+            self._user_tracker = None
 
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
@@ -519,6 +542,10 @@ class GovernanceRuntime:
                     ca = self._ensure_ca()
                     ca.update_trust(cert.certificate_id, new_trust)
 
+        # Audit trail (Phase 5)
+        if self._audit_trail is not None:
+            self._record_audit(action, context, verdict)
+
         # Update context history for future evaluations
         if verdict.verdict == Verdict.DENY:
             record = ActionRecord(
@@ -531,6 +558,299 @@ class GovernanceRuntime:
 
         for listener in self._listeners:
             listener(verdict)
+
+    # ── Audit trail integration (Phase 5) ────────────────────────────
+
+    def _record_audit(
+        self, action: Action, context: AgentContext, verdict: GovernanceVerdict,
+    ) -> None:
+        """Create an audit record for a governance decision."""
+        from nomotic.audit import AuditRecord, build_justification
+        from nomotic.context import CODES
+
+        # Determine context code
+        if verdict.verdict == Verdict.ALLOW:
+            code = CODES.GOVERNANCE_ALLOW
+        elif verdict.verdict == Verdict.DENY:
+            if verdict.vetoed_by:
+                code = CODES.GOVERNANCE_VETO
+            else:
+                code = CODES.GOVERNANCE_DENY
+        elif verdict.verdict == Verdict.ESCALATE:
+            code = CODES.GOVERNANCE_ESCALATE
+        elif verdict.verdict == Verdict.MODIFY:
+            code = CODES.GOVERNANCE_MODIFY
+        else:
+            code = CODES.GOVERNANCE_ALLOW
+
+        # Resolve owner from certificate
+        owner_id = ""
+        cert = self.get_certificate(action.agent_id)
+        if cert:
+            owner_id = cert.owner
+
+        # Resolve user from context
+        user_id = ""
+        if context.user_context is not None:
+            user_id = context.user_context.user_id
+
+        # Get trust state
+        profile = self.trust_calibrator.get_profile(context.agent_id)
+        trajectory = self.trust_calibrator.get_trajectory(context.agent_id)
+
+        # Get drift state
+        drift = self.get_drift(context.agent_id)
+
+        # Build justification
+        justification = build_justification(verdict, action, context, drift)
+
+        record = AuditRecord(
+            record_id=uuid.uuid4().hex[:12],
+            timestamp=time.time(),
+            context_code=code.code,
+            severity=code.severity,
+            agent_id=context.agent_id,
+            owner_id=owner_id,
+            user_id=user_id,
+            action_id=action.id,
+            action_type=action.action_type,
+            action_target=action.target,
+            verdict=verdict.verdict.name,
+            ucs=verdict.ucs,
+            tier=verdict.tier,
+            dimension_scores=[
+                {
+                    "name": s.dimension_name,
+                    "score": round(s.score, 4),
+                    "weight": s.weight,
+                    "veto": s.veto,
+                    "reasoning": s.reasoning,
+                }
+                for s in verdict.dimension_scores
+            ],
+            trust_score=profile.overall_trust,
+            trust_trend=trajectory.trend,
+            drift_overall=drift.overall if drift else None,
+            drift_severity=drift.severity if drift else None,
+            justification=justification,
+            metadata={
+                "session_id": context.session_id,
+                "config_version": (
+                    self._provenance_log.current_config_version()
+                    if self._provenance_log else ""
+                ),
+                "user_request_hash": (
+                    context.user_context.request_hash
+                    if context.user_context else ""
+                ),
+            },
+        )
+        assert self._audit_trail is not None
+        self._audit_trail.append(record)
+
+        # Track user activity
+        if (
+            context.user_context is not None
+            and context.user_context.user_id
+            and self._user_tracker is not None
+        ):
+            self._user_tracker.record_interaction(
+                user_id=context.user_context.user_id,
+                agent_id=context.agent_id,
+                verdict=verdict.verdict.name,
+                context_code=code.code,
+            )
+
+    def _record_provenance(
+        self,
+        actor: str,
+        target_type: str,
+        target_id: str,
+        change_type: str,
+        **kwargs: Any,
+    ) -> None:
+        """Record a configuration change in the provenance log."""
+        if self._provenance_log is not None:
+            self._provenance_log.record(
+                actor=actor,
+                target_type=target_type,
+                target_id=target_id,
+                change_type=change_type,
+                **kwargs,
+            )
+
+    # ── Provenance-tracked configuration wrappers ─────────────────
+
+    def configure_scope(
+        self,
+        agent_id: str,
+        scope: set[str],
+        *,
+        actor: str = "system",
+        reason: str = "",
+        ticket: str = "",
+    ) -> None:
+        """Configure agent scope with provenance tracking."""
+        dim = self.registry.get("scope_compliance")
+        previous = dim._allowed_scopes.get(agent_id)
+        dim.configure_agent_scope(agent_id, scope)
+        self._record_provenance(
+            actor=actor,
+            target_type="scope",
+            target_id=agent_id,
+            change_type="modify" if previous else "add",
+            previous_value=sorted(previous) if previous else None,
+            new_value=sorted(scope),
+            reason=reason,
+            ticket=ticket,
+            context_code="CONFIG.SCOPE_CHANGED",
+        )
+
+    def configure_boundaries(
+        self,
+        agent_id: str,
+        allowed_targets: set[str],
+        *,
+        actor: str = "system",
+        reason: str = "",
+        ticket: str = "",
+    ) -> None:
+        """Configure isolation boundaries with provenance tracking."""
+        dim = self.registry.get("isolation_integrity")
+        previous = dim._boundaries.get(agent_id)
+        dim.set_boundaries(agent_id, allowed_targets)
+        self._record_provenance(
+            actor=actor,
+            target_type="boundary",
+            target_id=agent_id,
+            change_type="modify" if previous else "add",
+            previous_value=sorted(previous) if previous else None,
+            new_value=sorted(allowed_targets),
+            reason=reason,
+            ticket=ticket,
+            context_code="CONFIG.BOUNDARY_CHANGED",
+        )
+
+    def configure_time_window(
+        self,
+        action_type: str,
+        start_hour: int,
+        end_hour: int,
+        *,
+        actor: str = "system",
+        reason: str = "",
+        ticket: str = "",
+    ) -> None:
+        """Configure temporal compliance window with provenance tracking."""
+        dim = self.registry.get("temporal_compliance")
+        previous = dim._time_windows.get(action_type)
+        dim.set_time_window(action_type, start_hour, end_hour)
+        self._record_provenance(
+            actor=actor,
+            target_type="time_window",
+            target_id=action_type,
+            change_type="modify" if previous else "add",
+            previous_value=list(previous) if previous else None,
+            new_value=[start_hour, end_hour],
+            reason=reason,
+            ticket=ticket,
+            context_code="CONFIG.THRESHOLD_CHANGED",
+        )
+
+    def configure_human_override(
+        self,
+        *action_types: str,
+        actor: str = "system",
+        reason: str = "",
+        ticket: str = "",
+    ) -> None:
+        """Configure human override requirements with provenance tracking."""
+        dim = self.registry.get("human_override")
+        previous = set(dim._require_human)
+        dim.require_human_for(*action_types)
+        self._record_provenance(
+            actor=actor,
+            target_type="override",
+            target_id=",".join(action_types),
+            change_type="add",
+            previous_value=sorted(previous) if previous else None,
+            new_value=sorted(dim._require_human),
+            reason=reason,
+            ticket=ticket,
+            context_code="CONFIG.THRESHOLD_CHANGED",
+        )
+
+    def add_ethical_rule(
+        self,
+        rule: Callable,
+        *,
+        actor: str = "system",
+        reason: str = "",
+        ticket: str = "",
+        rule_name: str = "",
+    ) -> None:
+        """Add an ethical rule with provenance tracking."""
+        dim = self.registry.get("ethical_alignment")
+        dim.add_rule(rule)
+        self._record_provenance(
+            actor=actor,
+            target_type="rule",
+            target_id=rule_name or "ethical_rule",
+            change_type="add",
+            new_value=rule_name or repr(rule),
+            reason=reason,
+            ticket=ticket,
+            context_code="CONFIG.RULE_ADDED",
+        )
+
+    def set_dimension_weight(
+        self,
+        dimension_name: str,
+        weight: float,
+        *,
+        actor: str = "system",
+        reason: str = "",
+        ticket: str = "",
+    ) -> None:
+        """Set a dimension weight with provenance tracking."""
+        dim = self.registry.get(dimension_name)
+        if dim is None:
+            raise ValueError(f"Unknown dimension: {dimension_name}")
+        previous = dim.weight
+        dim.weight = weight
+        self._record_provenance(
+            actor=actor,
+            target_type="weight",
+            target_id=dimension_name,
+            change_type="modify",
+            previous_value=previous,
+            new_value=weight,
+            reason=reason,
+            ticket=ticket,
+            context_code="CONFIG.WEIGHT_CHANGED",
+        )
+
+    # ── Phase 5 property accessors ────────────────────────────────
+
+    @property
+    def audit_trail(self) -> Any:
+        """The audit trail, or None if auditing is disabled."""
+        return self._audit_trail
+
+    @property
+    def provenance_log(self) -> Any:
+        """The provenance log, or None if auditing is disabled."""
+        return self._provenance_log
+
+    @property
+    def owner_activity(self) -> Any:
+        """The owner activity log, or None if auditing is disabled."""
+        return self._owner_activity
+
+    @property
+    def user_tracker(self) -> Any:
+        """The user activity tracker, or None if auditing is disabled."""
+        return self._user_tracker
 
     def _append_history(self, agent_id: str, record: ActionRecord) -> None:
         history = self._action_history.setdefault(agent_id, [])
