@@ -61,6 +61,9 @@ class RuntimeConfig:
     trust_config: TrustConfig = field(default_factory=TrustConfig)
     max_history_per_agent: int = 1000
     enable_fingerprints: bool = True
+    drift_config: Any = None
+    """Optional :class:`DriftConfig`.  If ``None``, uses DriftConfig defaults.
+    Passed to :class:`FingerprintObserver`."""
 
 
 class GovernanceRuntime:
@@ -122,15 +125,20 @@ class GovernanceRuntime:
             from nomotic.priors import PriorRegistry
             self._fingerprint_observer: FingerprintObserver | None = FingerprintObserver(
                 prior_registry=PriorRegistry.with_defaults(),
+                drift_config=self.config.drift_config,
             )
         else:
             self._fingerprint_observer = None
 
-        # Wire fingerprint accessor into BehavioralConsistency dimension
+        # Wire fingerprint and drift accessors into dimensions
         if self._fingerprint_observer is not None:
             behavioral = self.registry.get("behavioral_consistency")
             if behavioral is not None:
                 behavioral.set_fingerprint_accessor(self._fingerprint_observer.get_fingerprint)
+                behavioral.set_drift_accessor(self._fingerprint_observer.get_drift)
+            incident = self.registry.get("incident_detection")
+            if incident is not None:
+                incident.set_drift_accessor(self._fingerprint_observer.get_drift)
 
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
@@ -417,6 +425,24 @@ class GovernanceRuntime:
         if self._fingerprint_observer is None:
             return None
         return self._fingerprint_observer.get_fingerprint(agent_id)
+
+    def get_drift(self, agent_id: str) -> Any:
+        """Get the latest behavioral drift score for an agent.
+
+        Returns None if fingerprints/drift are disabled or if drift
+        has never been computed for this agent.
+        """
+        if self._fingerprint_observer is None:
+            return None
+        return self._fingerprint_observer.get_drift(agent_id)
+
+    def get_drift_alerts(
+        self, agent_id: str | None = None, **kwargs: bool,
+    ) -> list[Any]:
+        """Get drift alerts, optionally filtered by agent."""
+        if self._fingerprint_observer is None:
+            return []
+        return self._fingerprint_observer.get_alerts(agent_id, **kwargs)
 
     def _record_verdict(
         self, action: Action, context: AgentContext, verdict: GovernanceVerdict

@@ -18,10 +18,15 @@ Or more conveniently, the runtime can be configured to auto-attach::
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
 
 from nomotic.fingerprint import BehavioralFingerprint
 from nomotic.priors import PriorRegistry
 from nomotic.types import Action, GovernanceVerdict, Verdict
+
+if TYPE_CHECKING:
+    from nomotic.drift import DriftScore
+    from nomotic.monitor import DriftAlert, DriftConfig, DriftMonitor
 
 __all__ = ["FingerprintObserver"]
 
@@ -32,15 +37,27 @@ class FingerprintObserver:
     Attached to the GovernanceRuntime, the observer is called after every
     evaluate() and automatically updates the agent's fingerprint. No
     configuration required — fingerprints form from telemetry.
+
+    When drift detection is enabled (the default), the observer also
+    feeds a :class:`DriftMonitor` that tracks sliding-window drift
+    and generates alerts.
     """
 
     def __init__(
         self,
         prior_registry: PriorRegistry | None = None,
+        drift_config: DriftConfig | None = None,
     ) -> None:
         self._prior_registry = prior_registry or PriorRegistry.with_defaults()
         self._fingerprints: dict[str, BehavioralFingerprint] = {}
         self._lock = threading.Lock()
+
+        # Drift monitoring (Phase 4B)
+        from nomotic.monitor import DriftMonitor as _DriftMonitor
+        self._drift_monitor: _DriftMonitor = _DriftMonitor(
+            config=drift_config,
+            prior_registry=self._prior_registry,
+        )
 
     def get_fingerprint(self, agent_id: str) -> BehavioralFingerprint | None:
         """Get the current fingerprint for an agent."""
@@ -71,11 +88,20 @@ class FingerprintObserver:
     ) -> BehavioralFingerprint:
         """Record an observation from a governance evaluation.
 
-        Called after every runtime.evaluate(). If the agent has no
-        fingerprint, one is created (seeded from archetype prior if available).
+        Called after every runtime.evaluate(). Updates both the main
+        fingerprint and the drift monitor.
         """
         fp = self.get_or_create(agent_id, archetype)
         fp.observe(action, verdict)
+
+        # Feed drift monitor
+        self._drift_monitor.observe(
+            agent_id=agent_id,
+            action=action,
+            verdict=verdict,
+            baseline_fingerprint=fp,
+            archetype=archetype,
+        )
         return fp
 
     def on_verdict(self, verdict_data: GovernanceVerdict) -> None:
@@ -98,3 +124,23 @@ class FingerprintObserver:
         """Remove an agent's fingerprint. It will be recreated on next observation."""
         with self._lock:
             self._fingerprints.pop(agent_id, None)
+        self._drift_monitor.reset(agent_id)
+
+    # ── Drift accessors (Phase 4B) ──────────────────────────────────
+
+    def get_drift(self, agent_id: str) -> DriftScore | None:
+        """Get the latest drift score for an agent."""
+        return self._drift_monitor.get_drift(agent_id)
+
+    def get_alerts(
+        self,
+        agent_id: str | None = None,
+        **kwargs: bool,
+    ) -> list[DriftAlert]:
+        """Get drift alerts."""
+        return self._drift_monitor.get_alerts(agent_id, **kwargs)
+
+    @property
+    def drift_monitor(self) -> DriftMonitor:
+        """Direct access to the drift monitor (for configuration/inspection)."""
+        return self._drift_monitor

@@ -69,6 +69,8 @@ _ARCHETYPE_NAME_RE = re.compile(r"^/v1/archetypes/([a-z0-9][a-z0-9-]*[a-z0-9])$"
 _ORG_NAME_RE = re.compile(r"^/v1/organizations/([a-z0-9][a-z0-9-]*[a-z0-9])$")
 _ORG_ACTION_RE = re.compile(r"^/v1/organizations/([a-z0-9][a-z0-9-]*[a-z0-9])/(suspend|revoke)$")
 _FINGERPRINT_RE = re.compile(r"^/v1/fingerprint/(.+)$")
+_DRIFT_RE = re.compile(r"^/v1/drift/(.+)$")
+_ALERT_ACK_RE = re.compile(r"^/v1/alerts/([^/]+)/(\d+)/acknowledge$")
 
 
 # ── Request handler ─────────────────────────────────────────────────────
@@ -215,6 +217,19 @@ class _Handler(BaseHTTPRequestHandler):
         m = _FINGERPRINT_RE.match(path)
         if m and method == "GET":
             return self._handle_get_fingerprint(ctx, m.group(1))
+
+        # Drift
+        m = _DRIFT_RE.match(path)
+        if m and method == "GET":
+            return self._handle_get_drift(ctx, m.group(1))
+
+        # Alerts
+        if path == "/v1/alerts" and method == "GET":
+            return self._handle_get_alerts(ctx)
+
+        m = _ALERT_ACK_RE.match(path)
+        if m and method == "POST":
+            return self._handle_acknowledge_alert(ctx, m.group(1), int(m.group(2)))
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -546,6 +561,44 @@ class _Handler(BaseHTTPRequestHandler):
             "temporal_pattern": fp.temporal_pattern.to_dict(),
             "outcome_distribution": fp.outcome_distribution,
         })
+
+    # ── Drift ──────────────────────────────────────────────────────
+
+    def _handle_get_drift(self, ctx: _ServerContext, agent_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Drift detection requires a GovernanceRuntime")
+        drift = ctx.runtime.get_drift(agent_id)
+        if drift is None:
+            return _error(404, "not_found", f"No drift data for agent: {agent_id}")
+        alerts = ctx.runtime.get_drift_alerts(agent_id)
+        return 200, _json_bytes({
+            "agent_id": agent_id,
+            "drift": drift.to_dict(),
+            "alerts": [a.to_dict() for a in alerts],
+        })
+
+    def _handle_get_alerts(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Drift detection requires a GovernanceRuntime")
+        params = self._query_params()
+        agent_id = params.get("agent_id")
+        alerts = ctx.runtime.get_drift_alerts(agent_id)
+        unacked = sum(1 for a in alerts if not a.acknowledged)
+        return 200, _json_bytes({
+            "alerts": [a.to_dict() for a in alerts],
+            "total": len(alerts),
+            "unacknowledged": unacked,
+        })
+
+    def _handle_acknowledge_alert(self, ctx: _ServerContext, agent_id: str, index: int) -> tuple[int, bytes]:
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Drift detection requires a GovernanceRuntime")
+        if ctx.runtime._fingerprint_observer is None:
+            return _error(404, "not_found", "Drift detection is not enabled")
+        ok = ctx.runtime._fingerprint_observer.drift_monitor.acknowledge_alert(agent_id, index)
+        if not ok:
+            return _error(404, "not_found", f"Alert not found: agent={agent_id}, index={index}")
+        return 200, _json_bytes({"acknowledged": True})
 
 
 # ── Server context ──────────────────────────────────────────────────────

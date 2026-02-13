@@ -281,6 +281,9 @@ class BehavioralConsistency(GovernanceDimension):
     observer), the evaluation checks against the fingerprint's action
     distribution for richer scoring.  Without a fingerprint, falls back
     to the legacy "have I seen this action type before?" check.
+
+    When drift data is available (Phase 4B), high drift modulates the
+    score downward proportionally to the drift magnitude.
     """
 
     name = "behavioral_consistency"
@@ -290,6 +293,7 @@ class BehavioralConsistency(GovernanceDimension):
     def __init__(self) -> None:
         self._known_patterns: dict[str, set[str]] = {}  # agent_id -> action_types seen
         self._fingerprint_accessor: Callable[[str], Any] | None = None
+        self._drift_accessor: Callable[[str], Any] | None = None
         self._lock = threading.Lock()
 
     def set_fingerprint_accessor(
@@ -301,6 +305,12 @@ class BehavioralConsistency(GovernanceDimension):
         fingerprint access without circular imports.
         """
         self._fingerprint_accessor = accessor
+
+    def set_drift_accessor(
+        self, accessor: Callable[[str], Any],
+    ) -> None:
+        """Set a function that retrieves drift scores for agents."""
+        self._drift_accessor = accessor
 
     def evaluate(self, action: Action, context: AgentContext) -> DimensionScore:
         with self._lock:
@@ -319,70 +329,78 @@ class BehavioralConsistency(GovernanceDimension):
             is_novel = action.action_type not in seen
             seen.add(action.action_type)
 
+            # Compute base score and reasoning from fingerprint or legacy
+            base_score: float
+            base_reasoning: str
+            fp_confidence: float | None = None
+
             # If no fingerprint accessor, fall back to legacy behavior
             if self._fingerprint_accessor is None:
                 if is_novel:
-                    return DimensionScore(
-                        dimension_name=self.name,
-                        score=0.5,
-                        weight=self.weight,
-                        reasoning=f"Novel action type '{action.action_type}' for this agent",
-                    )
-                return DimensionScore(
-                    dimension_name=self.name,
-                    score=1.0,
-                    weight=self.weight,
-                    reasoning="Action type consistent with history",
-                )
-
-            # Enhanced behavior: check against fingerprint distribution
-            fp = self._fingerprint_accessor(context.agent_id)
-            if fp is None or fp.total_observations < 10:
-                # Not enough data — fall back to legacy
-                if is_novel:
-                    return DimensionScore(
-                        dimension_name=self.name,
-                        score=0.5,
-                        weight=self.weight,
-                        reasoning=f"Novel action type '{action.action_type}' (insufficient fingerprint data)",
-                    )
-                return DimensionScore(
-                    dimension_name=self.name,
-                    score=1.0,
-                    weight=self.weight,
-                    reasoning="Action type consistent with history",
-                )
-
-            # Check if this action type exists in the fingerprint's distribution
-            expected_freq = fp.action_distribution.get(action.action_type, 0.0)
-
-            if expected_freq >= 0.05:
-                # This is a normal action type (>= 5% of typical activity)
-                return DimensionScore(
-                    dimension_name=self.name,
-                    score=1.0,
-                    weight=self.weight,
-                    confidence=fp.confidence,
-                    reasoning=f"Action type '{action.action_type}' is {expected_freq:.0%} of typical activity",
-                )
-            elif expected_freq > 0:
-                # Rare but observed — mild concern
-                return DimensionScore(
-                    dimension_name=self.name,
-                    score=0.7,
-                    weight=self.weight,
-                    confidence=fp.confidence,
-                    reasoning=f"Action type '{action.action_type}' is rare ({expected_freq:.1%} of typical activity)",
-                )
+                    base_score = 0.5
+                    base_reasoning = f"Novel action type '{action.action_type}' for this agent"
+                else:
+                    base_score = 1.0
+                    base_reasoning = "Action type consistent with history"
             else:
-                # Never seen in fingerprint — moderate concern
-                return DimensionScore(
-                    dimension_name=self.name,
-                    score=0.4,
-                    weight=self.weight,
-                    confidence=fp.confidence,
-                    reasoning=f"Action type '{action.action_type}' has no precedent in behavioral fingerprint",
-                )
+                # Enhanced behavior: check against fingerprint distribution
+                fp = self._fingerprint_accessor(context.agent_id)
+                if fp is None or fp.total_observations < 10:
+                    # Not enough data — fall back to legacy
+                    if is_novel:
+                        base_score = 0.5
+                        base_reasoning = f"Novel action type '{action.action_type}' (insufficient fingerprint data)"
+                    else:
+                        base_score = 1.0
+                        base_reasoning = "Action type consistent with history"
+                else:
+                    fp_confidence = fp.confidence
+                    expected_freq = fp.action_distribution.get(action.action_type, 0.0)
+
+                    if expected_freq >= 0.05:
+                        base_score = 1.0
+                        base_reasoning = f"Action type '{action.action_type}' is {expected_freq:.0%} of typical activity"
+                    elif expected_freq > 0:
+                        base_score = 0.7
+                        base_reasoning = f"Action type '{action.action_type}' is rare ({expected_freq:.1%} of typical activity)"
+                    else:
+                        base_score = 0.4
+                        base_reasoning = f"Action type '{action.action_type}' has no precedent in behavioral fingerprint"
+
+            # Drift modulation (Phase 4B)
+            if self._drift_accessor is not None:
+                drift = self._drift_accessor(context.agent_id)
+                if drift is not None and drift.confidence > 0.3:
+                    if drift.overall >= 0.15:
+                        # Drift pulls the score down proportionally.
+                        # A drift of 0.0 has no effect.  A drift of 0.5 halves the score.
+                        drift_factor = 1.0 - (drift.overall * 0.6)
+                        # Cap so drift alone can't push below 0.2
+                        drift_factor = max(drift_factor, 0.2)
+                        adjusted_score = base_score * drift_factor
+
+                        if drift.overall >= 0.35:
+                            reasoning = f"{base_reasoning}; HIGH DRIFT detected ({drift.overall:.2f}): {drift.detail}"
+                        else:
+                            reasoning = f"{base_reasoning}; moderate drift detected ({drift.overall:.2f})"
+
+                        conf = min(fp_confidence, drift.confidence) if fp_confidence is not None else drift.confidence
+                        return DimensionScore(
+                            dimension_name=self.name,
+                            score=adjusted_score,
+                            weight=self.weight,
+                            confidence=conf,
+                            reasoning=reasoning,
+                        )
+
+            # No significant drift — return base score
+            return DimensionScore(
+                dimension_name=self.name,
+                score=base_score,
+                weight=self.weight,
+                confidence=fp_confidence if fp_confidence is not None else 1.0,
+                reasoning=base_reasoning,
+            )
 
 
 # --- Dimension 5: Cascading Impact ---
@@ -483,6 +501,11 @@ class IncidentDetection(GovernanceDimension):
     Cross-action pattern monitoring. Detects sequences that look like
     known incidents — rapid repeated failures, privilege escalation
     attempts, data exfiltration patterns.
+
+    When drift data is available (Phase 4B), critical drift is treated
+    as an incident signal — it means the agent's behaviour has
+    fundamentally changed, which could indicate compromise,
+    misconfiguration, or environmental issues.
     """
 
     name = "incident_detection"
@@ -491,6 +514,13 @@ class IncidentDetection(GovernanceDimension):
 
     def __init__(self) -> None:
         self._patterns: list[Callable[[Action, AgentContext], float | None]] = []
+        self._drift_accessor: Callable[[str], Any] | None = None
+
+    def set_drift_accessor(
+        self, accessor: Callable[[str], Any],
+    ) -> None:
+        """Set a function that retrieves drift scores for agents."""
+        self._drift_accessor = accessor
 
     def add_pattern(
         self, detector: Callable[[Action, AgentContext], float | None]
@@ -519,6 +549,23 @@ class IncidentDetection(GovernanceDimension):
             if result is not None and result < worst_score:
                 worst_score = result
                 worst_reason = "Custom incident pattern matched"
+
+        # Built-in drift-based incident detection (Phase 4B)
+        if self._drift_accessor is not None:
+            drift = self._drift_accessor(context.agent_id)
+            if drift is not None and drift.confidence > 0.5:
+                if drift.overall >= 0.60:
+                    # Critical drift is an incident
+                    score = min(worst_score, 0.1)
+                    if score <= worst_score:
+                        worst_reason = f"Critical behavioral drift detected ({drift.overall:.2f}): {drift.detail}"
+                    worst_score = score
+                elif drift.overall >= 0.40:
+                    # High drift lowers the score significantly
+                    score = min(worst_score, 0.3)
+                    if score <= worst_score:
+                        worst_reason = f"High behavioral drift ({drift.overall:.2f}): {drift.detail}"
+                    worst_score = score
 
         veto = worst_score <= 0.1
         return DimensionScore(
