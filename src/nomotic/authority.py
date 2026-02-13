@@ -26,6 +26,13 @@ from nomotic.certificate import (
 from nomotic.keys import SigningKey, VerifyKey
 from nomotic.store import CertificateStore, MemoryCertificateStore
 
+# Lazy imports to avoid circular dependency — resolved at runtime only
+# when registries are actually attached.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nomotic.registry import ArchetypeRegistry, OrganizationRegistry, ZoneValidator
+
 __all__ = ["CertificateAuthority"]
 
 _BASELINE_TRUST = 0.50
@@ -62,6 +69,10 @@ class CertificateAuthority:
         signing_key: SigningKey,
         store: CertificateStore | None = None,
         governance_config: dict[str, Any] | None = None,
+        *,
+        archetype_registry: ArchetypeRegistry | None = None,
+        zone_validator: ZoneValidator | None = None,
+        org_registry: OrganizationRegistry | None = None,
     ) -> None:
         self.issuer_id = issuer_id
         self._signing_key = signing_key
@@ -69,6 +80,9 @@ class CertificateAuthority:
         self._store: CertificateStore = store or MemoryCertificateStore()
         self._governance_config = governance_config
         self._governance_hash = _compute_governance_hash(governance_config)
+        self._archetype_registry = archetype_registry
+        self._zone_validator = zone_validator
+        self._org_registry = org_registry
 
     # ── Issuance ─────────────────────────────────────────────────────
 
@@ -92,6 +106,7 @@ class CertificateAuthority:
         Returns the certificate and the agent's private signing key.
         The caller is responsible for storing the private key securely.
         """
+        self._validate_inputs(archetype, zone_path, organization)
         agent_sk, agent_vk = SigningKey.generate()
         now = _utcnow()
 
@@ -321,10 +336,77 @@ class CertificateAuthority:
         self._governance_hash = _compute_governance_hash(config)
         return self._governance_hash
 
+    # ── Revocation list ──────────────────────────────────────────────
+
+    def get_revocation_list(self) -> list[dict[str, Any]]:
+        """Return all revoked certificates as a list of dicts.
+
+        Each entry contains: certificate_id, agent_id, organization,
+        revoked_at (if available), reason (if stored).
+        """
+        revoked = self._store.list_revoked()
+        result: list[dict[str, Any]] = []
+        for cert in revoked:
+            result.append({
+                "certificate_id": cert.certificate_id,
+                "agent_id": cert.agent_id,
+                "organization": cert.organization,
+                "revoked_at": cert.issued_at.isoformat(),
+            })
+        return result
+
     # ── Internal ─────────────────────────────────────────────────────
+
+    def _validate_inputs(
+        self, archetype: str, zone_path: str, organization: str,
+    ) -> None:
+        """Validate inputs against attached registries (if any)."""
+        import warnings
+
+        if self._archetype_registry is not None:
+            result = self._archetype_registry.validate(archetype)
+            if not result.valid:
+                raise ValueError(
+                    f"Invalid archetype '{archetype}': "
+                    + "; ".join(result.errors)
+                    + (f" (did you mean '{result.suggestion}'?)" if result.suggestion else "")
+                )
+            if result.warnings:
+                for w in result.warnings:
+                    warnings.warn(w, stacklevel=3)
+
+        if self._zone_validator is not None:
+            result = self._zone_validator.validate(zone_path)
+            if not result.valid:
+                raise ValueError(
+                    f"Invalid zone path '{zone_path}': "
+                    + "; ".join(result.errors)
+                )
+
+        if self._org_registry is not None:
+            org = self._org_registry.get(organization)
+            if org is None:
+                raise ValueError(
+                    f"Organization '{organization}' is not registered"
+                )
+            if org.status != _OrgStatusActive():
+                raise ValueError(
+                    f"Organization '{organization}' is {org.status.name}"
+                )
+            issuer_fp = self._verify_key.fingerprint()
+            if org.issuer_fingerprint != issuer_fp:
+                raise ValueError(
+                    f"Issuer key is not authorized for organization '{organization}'"
+                )
 
     def _require(self, certificate_id: str) -> AgentCertificate:
         cert = self._store.get(certificate_id)
         if cert is None:
             raise KeyError(f"Certificate not found: {certificate_id}")
         return cert
+
+
+def _OrgStatusActive():  # noqa: N802
+    """Lazy accessor for OrgStatus.ACTIVE to avoid circular import."""
+    from nomotic.registry import OrgStatus
+    return OrgStatus.ACTIVE

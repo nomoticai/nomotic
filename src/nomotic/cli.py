@@ -13,6 +13,18 @@ Usage::
     nomotic reputation <cert-id>
     nomotic export <cert-id>
 
+    nomotic archetype list [--category ...]
+    nomotic archetype register --name <name> --description <desc> --category <cat>
+    nomotic archetype validate <name>
+
+    nomotic org register --name <name> [--email <email>]
+    nomotic org list [--status ACTIVE]
+    nomotic org validate <name>
+
+    nomotic zone validate <path>
+
+    nomotic serve [--host 0.0.0.0] [--port 8420]
+
 Certificates are stored in ``~/.nomotic/certs/``.
 The issuer key is stored in ``~/.nomotic/issuer/``.
 """
@@ -29,6 +41,13 @@ from pathlib import Path
 from nomotic.authority import CertificateAuthority
 from nomotic.certificate import AgentCertificate, CertStatus
 from nomotic.keys import SigningKey, VerifyKey
+from nomotic.registry import (
+    ArchetypeRegistry,
+    FileOrgStore,
+    OrganizationRegistry,
+    OrgStatus,
+    ZoneValidator,
+)
 from nomotic.store import FileCertificateStore
 
 __all__ = ["main"]
@@ -81,16 +100,49 @@ def _build_ca(base: Path) -> tuple[CertificateAuthority, FileCertificateStore]:
     return ca, store
 
 
+def _build_registries(base: Path) -> tuple[ArchetypeRegistry, ZoneValidator, OrganizationRegistry]:
+    """Build the validation registries for CLI use."""
+    archetype_reg = ArchetypeRegistry.with_defaults()
+    zone_val = ZoneValidator()
+    org_store = FileOrgStore(base)
+    org_reg = OrganizationRegistry(store=org_store)
+    return archetype_reg, zone_val, org_reg
+
+
 # ── CLI commands ─────────────────────────────────────────────────────────
 
 
 def _cmd_birth(args: argparse.Namespace) -> None:
     ca, store = _build_ca(args.base_dir)
+    arch_reg, zone_val, _org_reg = _build_registries(args.base_dir)
+
+    # Validate archetype
+    archetype = args.archetype
+    arch_result = arch_reg.validate(archetype)
+    if not arch_result.valid:
+        msg = f"Invalid archetype '{archetype}': {'; '.join(arch_result.errors)}"
+        if arch_result.suggestion:
+            msg += f"\n  Did you mean '{arch_result.suggestion}'?"
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+    if arch_result.warnings:
+        for w in arch_result.warnings:
+            print(f"  Warning: {w}", file=sys.stderr)
+        if arch_result.suggestion:
+            print(f"  Did you mean '{arch_result.suggestion}'?", file=sys.stderr)
+
+    # Validate zone
+    zone_path = args.zone or "global"
+    zone_result = zone_val.validate(zone_path)
+    if not zone_result.valid:
+        print(f"Invalid zone path '{zone_path}': {'; '.join(zone_result.errors)}", file=sys.stderr)
+        sys.exit(1)
+
     cert, agent_sk = ca.issue(
         agent_id=args.agent_id,
-        archetype=args.archetype,
+        archetype=archetype,
         organization=args.org,
-        zone_path=args.zone or "global",
+        zone_path=zone_path,
     )
     # Save agent keys alongside certificate
     store.save_agent_key(cert.certificate_id, agent_sk.to_bytes())
@@ -222,6 +274,148 @@ def _cmd_export(args: argparse.Namespace) -> None:
     print(f"Exported to {filename}")
 
 
+# ── Archetype commands ───────────────────────────────────────────────────
+
+
+def _cmd_archetype(args: argparse.Namespace) -> None:
+    arch_reg = ArchetypeRegistry.with_defaults()
+    sub = args.archetype_command
+
+    if sub == "list":
+        archetypes = arch_reg.list(category=args.category)
+        if not archetypes:
+            print("No archetypes found.")
+            return
+        for a in archetypes:
+            print(f"  {a.name:30s}  {a.category:20s}  {'(builtin)' if a.builtin else '(custom)'}")
+            print(f"    {a.description}")
+
+    elif sub == "register":
+        try:
+            defn = arch_reg.register(args.name, args.description, args.category)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"Registered archetype: {defn.name}")
+
+    elif sub == "validate":
+        result = arch_reg.validate(args.name)
+        if result.valid:
+            print(f"VALID: {result.name}")
+            for w in result.warnings:
+                print(f"  Warning: {w}")
+            if result.suggestion:
+                print(f"  Suggestion: {result.suggestion}")
+        else:
+            print(f"INVALID: {result.name}")
+            for e in result.errors:
+                print(f"  Error: {e}")
+            if result.suggestion:
+                print(f"  Did you mean '{result.suggestion}'?")
+            sys.exit(1)
+
+    else:
+        print("Unknown archetype subcommand", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── Organization commands ────────────────────────────────────────────────
+
+
+def _cmd_org(args: argparse.Namespace) -> None:
+    _arch_reg, _zone_val, org_reg = _build_registries(args.base_dir)
+    sub = args.org_command
+
+    if sub == "register":
+        sk, vk, _issuer_id = _load_or_create_issuer(args.base_dir)
+        try:
+            org = org_reg.register(
+                args.name,
+                vk.fingerprint(),
+                contact_email=getattr(args, "email", None),
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"Registered organization: {org.name}")
+        print(f"  Display name: {org.display_name}")
+        print(f"  Issuer:       {org.issuer_fingerprint}")
+
+    elif sub == "list":
+        status_str = getattr(args, "status", None)
+        status = OrgStatus[status_str.upper()] if status_str else None
+        orgs = org_reg.list(status=status)
+        if not orgs:
+            print("No organizations found.")
+            return
+        for org in orgs:
+            print(f"  {org.name:30s}  {org.status.name:10s}  {org.display_name}")
+
+    elif sub == "validate":
+        result = org_reg.validate(args.name)
+        if result.valid:
+            print(f"VALID: {result.name} (available)")
+        else:
+            print(f"INVALID: {result.name}")
+            for e in result.errors:
+                print(f"  Error: {e}")
+            sys.exit(1)
+
+    else:
+        print("Unknown org subcommand", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── Zone commands ────────────────────────────────────────────────────────
+
+
+def _cmd_zone(args: argparse.Namespace) -> None:
+    zone_val = ZoneValidator()
+    sub = args.zone_command
+
+    if sub == "validate":
+        result = zone_val.validate(args.path)
+        if result.valid:
+            print(f"VALID: {result.name}")
+        else:
+            print(f"INVALID: {result.name}")
+            for e in result.errors:
+                print(f"  Error: {e}")
+            sys.exit(1)
+
+    else:
+        print("Unknown zone subcommand", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── Serve command ────────────────────────────────────────────────────────
+
+
+def _cmd_serve(args: argparse.Namespace) -> None:
+    from nomotic.api import NomoticAPIServer
+
+    ca, _store = _build_ca(args.base_dir)
+    arch_reg, zone_val, org_reg = _build_registries(args.base_dir)
+
+    server = NomoticAPIServer(
+        ca,
+        archetype_registry=arch_reg,
+        zone_validator=zone_val,
+        org_registry=org_reg,
+        host=args.host,
+        port=args.port,
+    )
+    sk, vk, issuer_id = _load_or_create_issuer(args.base_dir)
+    print(f"Nomotic API server starting on http://{args.host}:{args.port}")
+    print(f"  Issuer: {issuer_id}")
+    print(f"  Fingerprint: {vk.fingerprint()}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        server.shutdown()
+
+
 # ── Argument parser ──────────────────────────────────────────────────────
 
 
@@ -286,6 +480,47 @@ def build_parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export", help="Export public certificate to file")
     export.add_argument("cert_id", help="Certificate ID")
 
+    # ── archetype subcommands ────────────────────────────────────────
+    archetype = sub.add_parser("archetype", help="Manage archetypes")
+    arch_sub = archetype.add_subparsers(dest="archetype_command")
+
+    arch_list = arch_sub.add_parser("list", help="List archetypes")
+    arch_list.add_argument("--category", default=None, help="Filter by category")
+
+    arch_reg = arch_sub.add_parser("register", help="Register a custom archetype")
+    arch_reg.add_argument("--name", required=True, help="Archetype name")
+    arch_reg.add_argument("--description", required=True, help="Description")
+    arch_reg.add_argument("--category", required=True, help="Category")
+
+    arch_val = arch_sub.add_parser("validate", help="Validate an archetype name")
+    arch_val.add_argument("name", help="Archetype name to validate")
+
+    # ── org subcommands ──────────────────────────────────────────────
+    org = sub.add_parser("org", help="Manage organizations")
+    org_sub = org.add_subparsers(dest="org_command")
+
+    org_register = org_sub.add_parser("register", help="Register an organization")
+    org_register.add_argument("--name", required=True, help="Organization name")
+    org_register.add_argument("--email", default=None, help="Contact email")
+
+    org_list = org_sub.add_parser("list", help="List organizations")
+    org_list.add_argument("--status", default=None, help="Filter by status")
+
+    org_val = org_sub.add_parser("validate", help="Validate an org name")
+    org_val.add_argument("name", help="Organization name to validate")
+
+    # ── zone subcommands ─────────────────────────────────────────────
+    zone = sub.add_parser("zone", help="Manage governance zones")
+    zone_sub = zone.add_subparsers(dest="zone_command")
+
+    zone_val = zone_sub.add_parser("validate", help="Validate a zone path")
+    zone_val.add_argument("path", help="Zone path to validate")
+
+    # ── serve ────────────────────────────────────────────────────────
+    serve = sub.add_parser("serve", help="Start the Nomotic API server")
+    serve.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    serve.add_argument("--port", type=int, default=8420, help="Bind port (default: 8420)")
+
     return parser
 
 
@@ -308,6 +543,10 @@ def main(argv: list[str] | None = None) -> None:
         "list": _cmd_list,
         "reputation": _cmd_reputation,
         "export": _cmd_export,
+        "archetype": _cmd_archetype,
+        "org": _cmd_org,
+        "zone": _cmd_zone,
+        "serve": _cmd_serve,
     }
 
     handler = commands.get(args.command)

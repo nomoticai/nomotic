@@ -53,6 +53,7 @@ Documentation = "https://github.com/nomoticai/nomotic/tree/main/docs"
 dev = [
     "pytest>=8.0",
 ]
+api = []  # stdlib only for now — add starlette here if needed
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
