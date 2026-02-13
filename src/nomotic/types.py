@@ -23,6 +23,7 @@ __all__ = [
     "InterruptRequest",
     "Severity",
     "TrustProfile",
+    "UserContext",
     "Verdict",
 ]
 
@@ -79,6 +80,22 @@ class Action:
 
 
 @dataclass
+class UserContext:
+    """Information about the user who triggered an agent action.
+
+    Optional — not all agent actions are user-triggered.
+    Batch processing, scheduled tasks, and autonomous workflows
+    may have no user context.
+    """
+
+    user_id: str = ""           # Identifier for the user (email, ID, session)
+    session_id: str = ""        # User's session (for tracking repeated interactions)
+    request_hash: str = ""      # Hash of user's input (NOT the input itself — privacy)
+    classification: str = ""    # "normal", "out_of_scope", "suspicious", "manipulation"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class AgentContext:
     """Everything governance knows about the agent requesting an action.
 
@@ -92,6 +109,7 @@ class AgentContext:
     action_history: list[ActionRecord] = field(default_factory=list)
     active_constraints: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    user_context: UserContext | None = None
 
 
 @dataclass

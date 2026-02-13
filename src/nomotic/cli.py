@@ -694,6 +694,64 @@ def _cmd_hello(args: argparse.Namespace) -> None:
         print("    individual actions start getting denied.")
     print()
 
+    # Audit trail demo (Phase 5)
+    print(_bold("  Audit Trail (Phase 5):"))
+    if runtime.audit_trail is not None:
+        summary = runtime.audit_trail.summary()
+        print(f"    Total governance events audited: {summary['total_records']}")
+        by_verdict = summary.get("by_verdict", {})
+        if by_verdict:
+            parts = [f"{v}={c}" for v, c in sorted(by_verdict.items())]
+            print(f"    By verdict: {', '.join(parts)}")
+        by_severity = summary.get("by_severity", {})
+        if by_severity:
+            parts = [f"{s}={c}" for s, c in sorted(by_severity.items())]
+            print(f"    By severity: {', '.join(parts)}")
+        alerts = summary.get("recent_alerts", [])
+        if alerts:
+            print(f"    Recent alerts: {len(alerts)}")
+            for a in alerts[-3:]:
+                print(f"      [{a.get('severity', '?')}] {a.get('context_code', '?')} - {a.get('justification', '')[:80]}")
+
+        # Show a sample audit record
+        records = runtime.audit_trail.query(limit=1)
+        if records:
+            r = records[0]
+            print()
+            print(f"    Latest audit record:")
+            print(f"      Code:    {r.context_code}")
+            print(f"      Agent:   {r.agent_id}")
+            print(f"      Action:  {r.action_type} on {r.action_target}")
+            print(f"      Verdict: {r.verdict} (UCS: {r.ucs:.2f}, Tier {r.tier})")
+            print(f"      Trust:   {r.trust_score:.2f} ({r.trust_trend})")
+            if r.justification:
+                just = r.justification[:120]
+                if len(r.justification) > 120:
+                    just += "..."
+                print(f"      Why:     {just}")
+    else:
+        print("    Audit trail is disabled.")
+
+    # Provenance demo
+    print()
+    print(_bold("  Configuration Provenance:"))
+    runtime.configure_scope(
+        "hello-agent", {"read", "write", "query"},
+        actor="demo@nomotic.ai",
+        reason="Demo: restricting scope for hello-agent",
+    )
+    print(f"    Scope changed for hello-agent (tracked with provenance)")
+    if runtime.provenance_log is not None:
+        records = runtime.provenance_log.query(limit=1)
+        if records:
+            r = records[0]
+            print(f"      Actor:     {r.actor}")
+            print(f"      Change:    {r.change_type} {r.target_type}")
+            print(f"      New value: {r.new_value}")
+            print(f"      Reason:    {r.reason}")
+            print(f"      Version:   {runtime.provenance_log.current_config_version()}")
+    print()
+
     server.shutdown()
 
 
@@ -921,6 +979,168 @@ def _cmd_trust(args: argparse.Namespace) -> None:
         print()
 
 
+def _cmd_audit(args: argparse.Namespace) -> None:
+    """Show audit records (via API)."""
+    import urllib.request
+    import urllib.error
+
+    base_url = f"http://{args.host}:{args.port}"
+
+    if args.audit_command == "summary":
+        url = f"{base_url}/v1/audit/summary"
+        if args.agent_id:
+            url += f"?agent_id={args.agent_id}"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+            sys.exit(1)
+        except urllib.error.URLError as exc:
+            print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Audit Trail Summary")
+        print(f"  Total records: {data.get('total_records', 0)}")
+        by_verdict = data.get("by_verdict", {})
+        if by_verdict:
+            print(f"  By verdict:")
+            for v, c in sorted(by_verdict.items()):
+                print(f"    {v:12s} {c}")
+        by_severity = data.get("by_severity", {})
+        if by_severity:
+            print(f"  By severity:")
+            for s, c in sorted(by_severity.items()):
+                print(f"    {s:12s} {c}")
+        alerts = data.get("recent_alerts", [])
+        if alerts:
+            print(f"  Recent alerts ({len(alerts)}):")
+            for a in alerts:
+                print(f"    [{a.get('severity', '?')}] {a.get('context_code', '?')} - {a.get('agent_id', '?')}")
+        return
+
+    # Default: query
+    url = f"{base_url}/v1/audit?"
+    params = []
+    if args.agent_id:
+        params.append(f"agent_id={args.agent_id}")
+    if args.severity:
+        params.append(f"severity={args.severity}")
+    if args.limit:
+        params.append(f"limit={args.limit}")
+    url += "&".join(params)
+
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    records = data.get("records", [])
+    if not records:
+        print("No audit records found.")
+        return
+
+    print(f"Audit Records ({len(records)} shown):")
+    for r in records:
+        print(f"  [{r.get('severity', '?'):8s}] {r.get('context_code', '?'):25s} agent={r.get('agent_id', '?'):15s} verdict={r.get('verdict', '?')}")
+
+
+def _cmd_provenance(args: argparse.Namespace) -> None:
+    """Show configuration provenance records (via API)."""
+    import urllib.request
+    import urllib.error
+
+    base_url = f"http://{args.host}:{args.port}"
+    url = f"{base_url}/v1/provenance?"
+    params = []
+    if args.target_type:
+        params.append(f"target_type={args.target_type}")
+    if args.target_id:
+        params.append(f"target_id={args.target_id}")
+    url += "&".join(params)
+
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    records = data.get("records", [])
+    if not records:
+        print("No provenance records found.")
+        return
+
+    print(f"Provenance Records ({len(records)} shown):")
+    for r in records:
+        print(f"  [{r.get('change_type', '?'):6s}] {r.get('target_type', '?'):10s}/{r.get('target_id', '?'):15s} by {r.get('actor', '?')}")
+        if r.get("reason"):
+            print(f"          reason: {r['reason']}")
+
+
+def _cmd_owner(args: argparse.Namespace) -> None:
+    """Show owner activity and engagement (via API)."""
+    import urllib.request
+    import urllib.error
+
+    base_url = f"http://{args.host}:{args.port}"
+    owner_id = args.owner_id
+
+    if args.engagement:
+        url = f"{base_url}/v1/owner/{owner_id}/engagement"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+            sys.exit(1)
+        except urllib.error.URLError as exc:
+            print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Owner Engagement: {owner_id}")
+        print(f"  Total activities:     {data.get('total_activities', 0)}")
+        print(f"  Activities in window: {data.get('activities_in_window', 0)}")
+        print(f"  Alert response rate:  {data.get('alert_response_rate', 0):.1%}")
+        print(f"  Engagement level:     {data.get('engagement_level', 'unknown')}")
+        return
+
+    url = f"{base_url}/v1/owner/{owner_id}/activity"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    activities = data.get("activities", [])
+    if not activities:
+        print(f"No activity for owner: {owner_id}")
+        return
+
+    print(f"Owner Activity: {owner_id} ({len(activities)} shown)")
+    for a in activities:
+        print(f"  {a.get('activity_type', '?'):25s} agent={a.get('target_agent_id', '-')}")
+        if a.get("detail"):
+            print(f"    {a['detail']}")
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
     from nomotic.api import NomoticAPIServer
 
@@ -1080,6 +1300,40 @@ def build_parser() -> argparse.ArgumentParser:
     alerts_parser.add_argument("--host", default="127.0.0.1", help="API server host (default: 127.0.0.1)")
     alerts_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
 
+    # ── audit ────────────────────────────────────────────────────
+    audit_parser = sub.add_parser("audit", help="Show audit trail records")
+    audit_sub = audit_parser.add_subparsers(dest="audit_command")
+    audit_query = audit_sub.add_parser("query", help="Query audit records")
+    audit_query.add_argument("--agent-id", default=None, help="Filter by agent ID")
+    audit_query.add_argument("--severity", default=None, help="Filter by severity")
+    audit_query.add_argument("--limit", type=int, default=20, help="Max records to show")
+    audit_query.add_argument("--host", default="127.0.0.1", help="API server host")
+    audit_query.add_argument("--port", type=int, default=8420, help="API server port")
+    audit_summary = audit_sub.add_parser("summary", help="Show audit trail summary")
+    audit_summary.add_argument("--agent-id", default=None, help="Filter by agent ID")
+    audit_summary.add_argument("--host", default="127.0.0.1", help="API server host")
+    audit_summary.add_argument("--port", type=int, default=8420, help="API server port")
+    # Default: query
+    audit_parser.add_argument("--agent-id", default=None, help="Filter by agent ID")
+    audit_parser.add_argument("--severity", default=None, help="Filter by severity")
+    audit_parser.add_argument("--limit", type=int, default=20, help="Max records to show")
+    audit_parser.add_argument("--host", default="127.0.0.1", help="API server host")
+    audit_parser.add_argument("--port", type=int, default=8420, help="API server port")
+
+    # ── provenance ──────────────────────────────────────────────
+    prov_parser = sub.add_parser("provenance", help="Show configuration provenance")
+    prov_parser.add_argument("--target-type", default=None, help="Filter by target type")
+    prov_parser.add_argument("--target-id", default=None, help="Filter by target ID")
+    prov_parser.add_argument("--host", default="127.0.0.1", help="API server host")
+    prov_parser.add_argument("--port", type=int, default=8420, help="API server port")
+
+    # ── owner ───────────────────────────────────────────────────
+    owner_parser = sub.add_parser("owner", help="Show owner activity")
+    owner_parser.add_argument("owner_id", help="Owner identifier")
+    owner_parser.add_argument("--engagement", action="store_true", help="Show engagement score")
+    owner_parser.add_argument("--host", default="127.0.0.1", help="API server host")
+    owner_parser.add_argument("--port", type=int, default=8420, help="API server port")
+
     return parser
 
 
@@ -1111,6 +1365,9 @@ def main(argv: list[str] | None = None) -> None:
         "drift": _cmd_drift,
         "alerts": _cmd_alerts,
         "trust": _cmd_trust,
+        "audit": _cmd_audit,
+        "provenance": _cmd_provenance,
+        "owner": _cmd_owner,
     }
 
     handler = commands.get(args.command)

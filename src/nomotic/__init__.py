@@ -40,6 +40,16 @@ from nomotic.drift import DriftCalculator, DriftScore
 from nomotic.window import SlidingWindow
 from nomotic.monitor import DriftMonitor, DriftConfig, DriftAlert
 from nomotic.trajectory import TrustTrajectory, TrustEvent
+from nomotic.context import ContextCode, CODES
+from nomotic.audit import AuditRecord, AuditTrail, build_justification
+from nomotic.provenance import ProvenanceRecord, ProvenanceLog
+from nomotic.accountability import (
+    OwnerActivity,
+    OwnerActivityLog,
+    UserActivityTracker,
+    UserStats,
+)
+from nomotic.types import UserContext
 
 __all__ = [
     "Action",
@@ -98,4 +108,16 @@ __all__ = [
     "DriftAlert",
     "TrustTrajectory",
     "TrustEvent",
+    "ContextCode",
+    "CODES",
+    "AuditRecord",
+    "AuditTrail",
+    "build_justification",
+    "ProvenanceRecord",
+    "ProvenanceLog",
+    "OwnerActivity",
+    "OwnerActivityLog",
+    "UserActivityTracker",
+    "UserStats",
+    "UserContext",
 ]

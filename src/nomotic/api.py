@@ -73,6 +73,10 @@ _DRIFT_RE = re.compile(r"^/v1/drift/(.+)$")
 _ALERT_ACK_RE = re.compile(r"^/v1/alerts/([^/]+)/(\d+)/acknowledge$")
 _TRUST_RE = re.compile(r"^/v1/trust/([^/]+)$")
 _TRUST_TRAJECTORY_RE = re.compile(r"^/v1/trust/([^/]+)/trajectory$")
+_PROVENANCE_HISTORY_RE = re.compile(r"^/v1/provenance/history/([^/]+)/(.+)$")
+_OWNER_ACTIVITY_RE = re.compile(r"^/v1/owner/([^/]+)/activity$")
+_OWNER_ENGAGEMENT_RE = re.compile(r"^/v1/owner/([^/]+)/engagement$")
+_USER_STATS_RE = re.compile(r"^/v1/user/([^/]+)/stats$")
 
 
 # ── Request handler ─────────────────────────────────────────────────────
@@ -241,6 +245,32 @@ class _Handler(BaseHTTPRequestHandler):
         m = _TRUST_RE.match(path)
         if m and method == "GET":
             return self._handle_get_trust(ctx, m.group(1))
+
+        # Audit (Phase 5)
+        if path == "/v1/audit" and method == "GET":
+            return self._handle_audit_query(ctx)
+        if path == "/v1/audit/summary" and method == "GET":
+            return self._handle_audit_summary(ctx)
+
+        # Provenance (Phase 5)
+        if path == "/v1/provenance" and method == "GET":
+            return self._handle_provenance_query(ctx)
+        m = _PROVENANCE_HISTORY_RE.match(path)
+        if m and method == "GET":
+            return self._handle_provenance_history(ctx, m.group(1), m.group(2))
+
+        # Owner (Phase 5)
+        m = _OWNER_ACTIVITY_RE.match(path)
+        if m and method == "GET":
+            return self._handle_owner_activity(ctx, m.group(1))
+        m = _OWNER_ENGAGEMENT_RE.match(path)
+        if m and method == "GET":
+            return self._handle_owner_engagement(ctx, m.group(1))
+
+        # User stats (Phase 5)
+        m = _USER_STATS_RE.match(path)
+        if m and method == "GET":
+            return self._handle_user_stats(ctx, m.group(1))
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -662,6 +692,138 @@ class _Handler(BaseHTTPRequestHandler):
             "events": [e.to_dict() for e in events],
             "total": len(events),
         })
+
+    # ── Audit (Phase 5) ─────────────────────────────────────────────
+
+    def _handle_audit_query(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        if ctx.runtime is None or ctx.runtime.audit_trail is None:
+            return _error(404, "not_found", "Audit trail requires a GovernanceRuntime with audit enabled")
+        params = self._query_params()
+        kwargs: dict[str, Any] = {}
+        for key in ("agent_id", "severity", "category", "verdict", "context_code", "owner_id", "user_id"):
+            if key in params:
+                kwargs[key] = params[key]
+        if "since" in params:
+            try:
+                kwargs["since"] = float(params["since"])
+            except ValueError:
+                pass
+        if "until" in params:
+            try:
+                kwargs["until"] = float(params["until"])
+            except ValueError:
+                pass
+        if "limit" in params:
+            try:
+                kwargs["limit"] = min(int(params["limit"]), 500)
+            except ValueError:
+                pass
+        records = ctx.runtime.audit_trail.query(**kwargs)
+        return 200, _json_bytes({
+            "records": [r.to_dict() for r in records],
+            "total": len(records),
+        })
+
+    def _handle_audit_summary(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        if ctx.runtime is None or ctx.runtime.audit_trail is None:
+            return _error(404, "not_found", "Audit trail requires a GovernanceRuntime with audit enabled")
+        params = self._query_params()
+        kwargs: dict[str, Any] = {}
+        if "agent_id" in params:
+            kwargs["agent_id"] = params["agent_id"]
+        if "since" in params:
+            try:
+                kwargs["since"] = float(params["since"])
+            except ValueError:
+                pass
+        summary = ctx.runtime.audit_trail.summary(**kwargs)
+        return 200, _json_bytes(summary)
+
+    # ── Provenance (Phase 5) ─────────────────────────────────────────
+
+    def _handle_provenance_query(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        if ctx.runtime is None or ctx.runtime.provenance_log is None:
+            return _error(404, "not_found", "Provenance log requires a GovernanceRuntime with audit enabled")
+        params = self._query_params()
+        kwargs: dict[str, Any] = {}
+        for key in ("actor", "target_type", "target_id", "change_type"):
+            if key in params:
+                kwargs[key] = params[key]
+        if "since" in params:
+            try:
+                kwargs["since"] = float(params["since"])
+            except ValueError:
+                pass
+        if "limit" in params:
+            try:
+                kwargs["limit"] = min(int(params["limit"]), 500)
+            except ValueError:
+                pass
+        records = ctx.runtime.provenance_log.query(**kwargs)
+        return 200, _json_bytes({
+            "records": [r.to_dict() for r in records],
+            "total": len(records),
+        })
+
+    def _handle_provenance_history(self, ctx: _ServerContext, target_type: str, target_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None or ctx.runtime.provenance_log is None:
+            return _error(404, "not_found", "Provenance log requires a GovernanceRuntime with audit enabled")
+        records = ctx.runtime.provenance_log.history(target_type, target_id)
+        return 200, _json_bytes({
+            "target_type": target_type,
+            "target_id": target_id,
+            "records": [r.to_dict() for r in records],
+            "total": len(records),
+        })
+
+    # ── Owner (Phase 5) ──────────────────────────────────────────────
+
+    def _handle_owner_activity(self, ctx: _ServerContext, owner_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None or ctx.runtime.owner_activity is None:
+            return _error(404, "not_found", "Owner tracking requires a GovernanceRuntime with audit enabled")
+        params = self._query_params()
+        kwargs: dict[str, Any] = {}
+        if "activity_type" in params:
+            kwargs["activity_type"] = params["activity_type"]
+        if "since" in params:
+            try:
+                kwargs["since"] = float(params["since"])
+            except ValueError:
+                pass
+        if "limit" in params:
+            try:
+                kwargs["limit"] = min(int(params["limit"]), 500)
+            except ValueError:
+                pass
+        activities = ctx.runtime.owner_activity.get_activities(owner_id, **kwargs)
+        return 200, _json_bytes({
+            "owner_id": owner_id,
+            "activities": [a.to_dict() for a in activities],
+            "total": len(activities),
+        })
+
+    def _handle_owner_engagement(self, ctx: _ServerContext, owner_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None or ctx.runtime.owner_activity is None:
+            return _error(404, "not_found", "Owner tracking requires a GovernanceRuntime with audit enabled")
+        params = self._query_params()
+        window_days = 30
+        if "window_days" in params:
+            try:
+                window_days = int(params["window_days"])
+            except ValueError:
+                pass
+        score = ctx.runtime.owner_activity.engagement_score(owner_id, window_days=window_days)
+        return 200, _json_bytes(score)
+
+    # ── User stats (Phase 5) ─────────────────────────────────────────
+
+    def _handle_user_stats(self, ctx: _ServerContext, user_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None or ctx.runtime.user_tracker is None:
+            return _error(404, "not_found", "User tracking requires a GovernanceRuntime with audit enabled")
+        stats = ctx.runtime.user_tracker.get_stats(user_id)
+        if stats is None:
+            return _error(404, "not_found", f"No interaction data for user: {user_id}")
+        return 200, _json_bytes(stats.to_dict())
 
 
 # ── Server context ──────────────────────────────────────────────────────
