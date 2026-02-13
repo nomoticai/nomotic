@@ -68,6 +68,7 @@ _VERIFY_RE = re.compile(r"^/v1/verify/(nmc-[^/]+)$")
 _ARCHETYPE_NAME_RE = re.compile(r"^/v1/archetypes/([a-z0-9][a-z0-9-]*[a-z0-9])$")
 _ORG_NAME_RE = re.compile(r"^/v1/organizations/([a-z0-9][a-z0-9-]*[a-z0-9])$")
 _ORG_ACTION_RE = re.compile(r"^/v1/organizations/([a-z0-9][a-z0-9-]*[a-z0-9])/(suspend|revoke)$")
+_FINGERPRINT_RE = re.compile(r"^/v1/fingerprint/(.+)$")
 
 
 # ── Request handler ─────────────────────────────────────────────────────
@@ -209,6 +210,11 @@ class _Handler(BaseHTTPRequestHandler):
         # Zones
         if path == "/v1/zones/validate" and method == "POST":
             return self._handle_validate_zone(ctx)
+
+        # Fingerprints
+        m = _FINGERPRINT_RE.match(path)
+        if m and method == "GET":
+            return self._handle_get_fingerprint(ctx, m.group(1))
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -523,6 +529,24 @@ class _Handler(BaseHTTPRequestHandler):
             "errors": result.errors,
         })
 
+    # ── Fingerprints ───────────────────────────────────────────────
+
+    def _handle_get_fingerprint(self, ctx: _ServerContext, agent_id: str) -> tuple[int, bytes]:
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Fingerprints require a GovernanceRuntime")
+        fp = ctx.runtime.get_fingerprint(agent_id)
+        if fp is None:
+            return _error(404, "not_found", f"No fingerprint for agent: {agent_id}")
+        return 200, _json_bytes({
+            "agent_id": fp.agent_id,
+            "total_observations": fp.total_observations,
+            "confidence": fp.confidence,
+            "action_distribution": fp.action_distribution,
+            "target_distribution": fp.target_distribution,
+            "temporal_pattern": fp.temporal_pattern.to_dict(),
+            "outcome_distribution": fp.outcome_distribution,
+        })
+
 
 # ── Server context ──────────────────────────────────────────────────────
 
@@ -536,11 +560,13 @@ class _ServerContext:
         archetype_registry: ArchetypeRegistry,
         zone_validator: ZoneValidator,
         org_registry: OrganizationRegistry,
+        runtime: Any = None,
     ) -> None:
         self.ca = ca
         self.archetype_registry = archetype_registry
         self.zone_validator = zone_validator
         self.org_registry = org_registry
+        self.runtime = runtime
         self.started_at = time.time()
 
 
@@ -567,6 +593,7 @@ class NomoticAPIServer:
         archetype_registry: ArchetypeRegistry | None = None,
         zone_validator: ZoneValidator | None = None,
         org_registry: OrganizationRegistry | None = None,
+        runtime: Any = None,
         host: str = "0.0.0.0",
         port: int = 8420,
     ) -> None:
@@ -574,6 +601,7 @@ class NomoticAPIServer:
         self._archetype_registry = archetype_registry or ArchetypeRegistry.with_defaults()
         self._zone_validator = zone_validator or ZoneValidator()
         self._org_registry = org_registry or OrganizationRegistry()
+        self._runtime = runtime
         self._host = host
         self._port = port
         self._server: NomoticHTTPServer | None = None
@@ -585,6 +613,7 @@ class NomoticAPIServer:
             archetype_registry=self._archetype_registry,
             zone_validator=self._zone_validator,
             org_registry=self._org_registry,
+            runtime=self._runtime,
         )
         return server
 

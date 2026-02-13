@@ -60,6 +60,7 @@ class RuntimeConfig:
     trust_influence: float = 0.2
     trust_config: TrustConfig = field(default_factory=TrustConfig)
     max_history_per_agent: int = 1000
+    enable_fingerprints: bool = True
 
 
 class GovernanceRuntime:
@@ -113,6 +114,23 @@ class GovernanceRuntime:
         self._action_history: dict[str, list[ActionRecord]] = {}
         self._verdicts: dict[str, GovernanceVerdict] = {}
         self._listeners: list[Callable[[GovernanceVerdict], None]] = []
+
+        # Behavioral fingerprint observer (opt-in, default: enabled)
+        if self.config.enable_fingerprints:
+            from nomotic.fingerprint import BehavioralFingerprint
+            from nomotic.observer import FingerprintObserver
+            from nomotic.priors import PriorRegistry
+            self._fingerprint_observer: FingerprintObserver | None = FingerprintObserver(
+                prior_registry=PriorRegistry.with_defaults(),
+            )
+        else:
+            self._fingerprint_observer = None
+
+        # Wire fingerprint accessor into BehavioralConsistency dimension
+        if self._fingerprint_observer is not None:
+            behavioral = self.registry.get("behavioral_consistency")
+            if behavioral is not None:
+                behavioral.set_fingerprint_accessor(self._fingerprint_observer.get_fingerprint)
 
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
@@ -390,12 +408,35 @@ class GovernanceRuntime:
 
         return verdict
 
+    def get_fingerprint(self, agent_id: str) -> Any:
+        """Get the behavioral fingerprint for an agent.
+
+        Returns None if fingerprints are disabled or if no fingerprint
+        exists for the agent.
+        """
+        if self._fingerprint_observer is None:
+            return None
+        return self._fingerprint_observer.get_fingerprint(agent_id)
+
     def _record_verdict(
         self, action: Action, context: AgentContext, verdict: GovernanceVerdict
     ) -> None:
         """Record a verdict and update trust."""
         self._verdicts[action.id] = verdict
         self.trust_calibrator.record_verdict(context.agent_id, verdict)
+
+        # Update behavioral fingerprint
+        if self._fingerprint_observer is not None:
+            archetype = None
+            cert = self.get_certificate(action.agent_id)
+            if cert:
+                archetype = cert.archetype
+            self._fingerprint_observer.observe(
+                agent_id=context.agent_id,
+                action=action,
+                verdict=verdict.verdict,
+                archetype=archetype,
+            )
 
         # Update context history for future evaluations
         if verdict.verdict == Verdict.DENY:

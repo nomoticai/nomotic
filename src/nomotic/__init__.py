@@ -33,6 +33,9 @@ from nomotic.registry import (
 )
 from nomotic.sdk import GovernedAgent, GovernedResponse, CertificateLoadError, GovernedRequestError
 from nomotic.middleware import NomoticGateway, GatewayConfig, GatewayResult
+from nomotic.fingerprint import BehavioralFingerprint, TemporalPattern
+from nomotic.priors import ArchetypePrior, TemporalProfile, PriorRegistry
+from nomotic.observer import FingerprintObserver
 
 __all__ = [
     "Action",
@@ -77,4 +80,10 @@ __all__ = [
     "NomoticGateway",
     "GatewayConfig",
     "GatewayResult",
+    "BehavioralFingerprint",
+    "TemporalPattern",
+    "ArchetypePrior",
+    "TemporalProfile",
+    "PriorRegistry",
+    "FingerprintObserver",
 ]
