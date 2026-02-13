@@ -31,6 +31,8 @@ from nomotic.registry import (
     ValidationResult,
     ZoneValidator,
 )
+from nomotic.sdk import GovernedAgent, GovernedResponse, CertificateLoadError, GovernedRequestError
+from nomotic.middleware import NomoticGateway, GatewayConfig, GatewayResult
 
 __all__ = [
     "Action",
@@ -68,4 +70,11 @@ __all__ = [
     "OrgStore",
     "ValidationResult",
     "ZoneValidator",
+    "GovernedAgent",
+    "GovernedResponse",
+    "CertificateLoadError",
+    "GovernedRequestError",
+    "NomoticGateway",
+    "GatewayConfig",
+    "GatewayResult",
 ]
