@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from nomotic.types import (
     ActionRecord,
@@ -29,6 +30,19 @@ from nomotic.types import (
     TrustProfile,
     Verdict,
 )
+from nomotic.trajectory import (
+    TrustTrajectory,
+    SOURCE_COMPLETION_INTERRUPT,
+    SOURCE_COMPLETION_SUCCESS,
+    SOURCE_DRIFT_ADJUSTMENT,
+    SOURCE_DRIFT_RECOVERY,
+    SOURCE_TIME_DECAY,
+    SOURCE_VERDICT_ALLOW,
+    SOURCE_VERDICT_DENY,
+)
+
+if TYPE_CHECKING:
+    from nomotic.drift import DriftScore
 
 __all__ = ["TrustCalibrator", "TrustConfig"]
 
@@ -67,6 +81,8 @@ class TrustCalibrator:
         self.config = config or TrustConfig()
         self._validate_config(self.config)
         self._profiles: dict[str, TrustProfile] = {}
+        self._trajectories: dict[str, TrustTrajectory] = {}
+        self._last_drift_scores: dict[str, float] = {}
 
     @staticmethod
     def _validate_config(config: TrustConfig) -> None:
@@ -93,6 +109,12 @@ class TrustCalibrator:
             )
         return self._profiles[agent_id]
 
+    def get_trajectory(self, agent_id: str) -> TrustTrajectory:
+        """Get or create the trust trajectory for an agent."""
+        if agent_id not in self._trajectories:
+            self._trajectories[agent_id] = TrustTrajectory(agent_id)
+        return self._trajectories[agent_id]
+
     def record_verdict(
         self, agent_id: str, verdict: GovernanceVerdict
     ) -> TrustProfile:
@@ -103,6 +125,8 @@ class TrustCalibrator:
         that governance rejected.
         """
         profile = self.get_profile(agent_id)
+        trajectory = self.get_trajectory(agent_id)
+        trust_before = profile.overall_trust
 
         if verdict.verdict == Verdict.DENY:
             profile.violation_count += 1
@@ -122,6 +146,14 @@ class TrustCalibrator:
                         dim_trust - self.config.violation_decrement,
                     )
 
+            trajectory.record(
+                trust_before=trust_before,
+                trust_after=profile.overall_trust,
+                source=SOURCE_VERDICT_DENY,
+                reason=f"Action denied: {verdict.reasoning[:100]}" if verdict.reasoning else "Action denied",
+                metadata={"action_id": verdict.action_id, "tier": verdict.tier},
+            )
+
         elif verdict.verdict == Verdict.ALLOW:
             profile.successful_actions += 1
             profile.overall_trust = min(
@@ -139,6 +171,14 @@ class TrustCalibrator:
                         dim_trust + self.config.success_increment * 0.5,
                     )
 
+            trajectory.record(
+                trust_before=trust_before,
+                trust_after=profile.overall_trust,
+                source=SOURCE_VERDICT_ALLOW,
+                reason="Action allowed",
+                metadata={"action_id": verdict.action_id},
+            )
+
         profile.last_updated = time.time()
         return profile
 
@@ -151,16 +191,30 @@ class TrustCalibrator:
         Successful completion reinforces trust. Interruption reduces it.
         """
         profile = self.get_profile(agent_id)
+        trajectory = self.get_trajectory(agent_id)
+        trust_before = profile.overall_trust
 
         if record.interrupted:
             profile.overall_trust = max(
                 self.config.min_trust,
                 profile.overall_trust - self.config.interrupt_decrement,
             )
+            trajectory.record(
+                trust_before=trust_before,
+                trust_after=profile.overall_trust,
+                source=SOURCE_COMPLETION_INTERRUPT,
+                reason=f"Action interrupted: {record.interrupt_reason[:100]}" if record.interrupt_reason else "Action interrupted",
+            )
         elif record.state == ActionState.COMPLETED:
             profile.overall_trust = min(
                 self.config.max_trust,
                 profile.overall_trust + self.config.success_increment * 0.5,
+            )
+            trajectory.record(
+                trust_before=trust_before,
+                trust_after=profile.overall_trust,
+                source=SOURCE_COMPLETION_SUCCESS,
+                reason="Action completed successfully",
             )
 
         profile.last_updated = time.time()
@@ -174,6 +228,7 @@ class TrustCalibrator:
         after an agent has been idle.
         """
         profile = self.get_profile(agent_id)
+        trust_before = profile.overall_trust
         elapsed_hours = (time.time() - profile.last_updated) / 3600
         if elapsed_hours < 0.01:
             return profile
@@ -189,6 +244,92 @@ class TrustCalibrator:
                 self.config.baseline_trust,
                 profile.overall_trust + decay,
             )
+
+        if abs(profile.overall_trust - trust_before) > 0.001:
+            trajectory = self.get_trajectory(agent_id)
+            trajectory.record(
+                trust_before=trust_before,
+                trust_after=profile.overall_trust,
+                source=SOURCE_TIME_DECAY,
+                reason="Trust decayed toward baseline during inactivity",
+            )
+
+        profile.last_updated = time.time()
+        return profile
+
+    def apply_drift(
+        self,
+        agent_id: str,
+        drift_score: DriftScore,
+    ) -> TrustProfile:
+        """Adjust trust based on behavioral drift.
+
+        Called by the runtime after drift is computed (every check_interval
+        observations).  This is the bridge between drift detection and trust.
+
+        Drift adjustment rules:
+        - drift.overall < 0.10: no adjustment (within normal variance)
+        - drift.overall 0.10-0.20: very small erosion (-0.002 per check)
+        - drift.overall 0.20-0.40: moderate erosion (-0.008 per check)
+        - drift.overall 0.40-0.60: significant erosion (-0.02 per check)
+        - drift.overall >= 0.60: heavy erosion (-0.04 per check)
+
+        Recovery: if drift decreases from the previous check back below
+        0.15, apply a small recovery (+0.003 per check).
+
+        All adjustments are scaled by drift.confidence.
+        """
+        profile = self.get_profile(agent_id)
+        trajectory = self.get_trajectory(agent_id)
+
+        trust_before = profile.overall_trust
+
+        confidence = drift_score.confidence
+
+        drift = drift_score.overall
+        previous_drift = self._last_drift_scores.get(agent_id, 0.0)
+        self._last_drift_scores[agent_id] = drift
+
+        adjustment = 0.0
+        reason = ""
+
+        if drift >= 0.60:
+            adjustment = -0.04 * confidence
+            reason = f"Critical behavioral drift ({drift:.2f})"
+        elif drift >= 0.40:
+            adjustment = -0.02 * confidence
+            reason = f"High behavioral drift ({drift:.2f})"
+        elif drift >= 0.20:
+            adjustment = -0.008 * confidence
+            reason = f"Moderate behavioral drift ({drift:.2f})"
+        elif drift >= 0.10:
+            adjustment = -0.002 * confidence
+            reason = f"Low behavioral drift ({drift:.2f})"
+        elif drift < 0.15 and previous_drift >= 0.15:
+            adjustment = 0.003 * confidence
+            reason = f"Behavioral drift recovered ({previous_drift:.2f} -> {drift:.2f})"
+
+        if abs(adjustment) < 0.0001:
+            return profile
+
+        profile.overall_trust = max(
+            self.config.min_trust,
+            min(self.config.max_trust, profile.overall_trust + adjustment),
+        )
+
+        source = SOURCE_DRIFT_RECOVERY if adjustment > 0 else SOURCE_DRIFT_ADJUSTMENT
+        trajectory.record(
+            trust_before=trust_before,
+            trust_after=profile.overall_trust,
+            source=source,
+            reason=reason,
+            metadata={
+                "drift_overall": drift,
+                "drift_confidence": confidence,
+                "drift_severity": drift_score.severity,
+                "adjustment": adjustment,
+            },
+        )
 
         profile.last_updated = time.time()
         return profile

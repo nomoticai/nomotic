@@ -557,7 +557,7 @@ def _cmd_hello(args: argparse.Namespace) -> None:
 
     print()
     print(_bold("  Behavioral Fingerprint:"))
-    drift_cfg = _DriftConfig(window_size=15, check_interval=5, min_observations=5)
+    drift_cfg = _DriftConfig(window_size=50, check_interval=10, min_observations=10)
     runtime = GovernanceRuntime(config=RuntimeConfig(enable_fingerprints=True, drift_config=drift_cfg))
     demo_actions = [
         ("read", "/api/data"),
@@ -588,8 +588,8 @@ def _cmd_hello(args: argparse.Namespace) -> None:
     # Drift detection demo
     print()
     print(_bold("  Drift Detection:"))
-    print("    Building normal baseline (20 read operations)...")
-    for i in range(20):
+    print("    Building normal baseline (55 read operations)...")
+    for i in range(55):
         action = GovAction(agent_id="hello-agent", action_type="read", target="/api/data")
         ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
         runtime.evaluate(action, ctx)
@@ -600,31 +600,21 @@ def _cmd_hello(args: argparse.Namespace) -> None:
     else:
         print(f"    Baseline drift: {_green('not yet computed')}")
 
-    print("    Agent changes behavior to mass deletes on sensitive targets...")
-    # Shift behavior to mostly deletes on sensitive targets
-    drift_actions = [
-        ("delete", "/api/sensitive/data"),
-        ("delete", "/api/user/records"),
-        ("delete", "/api/config/keys"),
-        ("delete", "/api/sensitive/data"),
-        ("delete", "/api/user/records"),
-        ("delete", "/api/config/keys"),
-        ("delete", "/api/sensitive/data"),
-        ("delete", "/api/user/records"),
-        ("delete", "/api/config/keys"),
-        ("delete", "/api/sensitive/data"),
-        ("delete", "/api/user/records"),
-        ("delete", "/api/config/keys"),
-        ("delete", "/api/sensitive/data"),
-        ("delete", "/api/user/records"),
-        ("delete", "/api/config/keys"),
-    ]
-    for i, (action_type, target) in enumerate(drift_actions):
-        action = GovAction(agent_id="hello-agent", action_type=action_type, target=target)
+    trust_before_drift = runtime.get_trust_profile("hello-agent").overall_trust
+    print(f"    Trust before drift: {_green(f'{trust_before_drift:.2f}')}")
+
+    print("    Agent changes behavior to mass deletes on sensitive targets (40 actions)...")
+    delete_targets = ["/api/sensitive/data", "/api/user/records", "/api/config/keys"]
+    for i in range(40):
+        target = delete_targets[i % len(delete_targets)]
+        action = GovAction(agent_id="hello-agent", action_type="delete", target=target)
         ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
         runtime.evaluate(action, ctx)
-        status = _red(action_type.upper())
-        print(f"    [{i+1:2d}] {status} {target}")
+        if i < 5 or i >= 37:
+            status = _red("DELETE")
+            print(f"    [{i+1:2d}] {status} {target}")
+        elif i == 5:
+            print(f"    ... (35 more deletes) ...")
 
     drift_score = runtime.get_drift("hello-agent")
     if drift_score is not None:
@@ -644,6 +634,64 @@ def _cmd_hello(args: argparse.Namespace) -> None:
         for alert in alerts:
             color = _red if alert.severity == "critical" else (_yellow if alert.severity == "high" else _cyan)
             print(f"      {color(alert.severity)}: {alert.drift_score.detail}")
+
+    # Trust erosion from drift (Phase 4C)
+    print()
+    print(_bold("  Trust Impact from Drift:"))
+    trust_after_drift = runtime.get_trust_profile("hello-agent").overall_trust
+    trajectory = runtime.get_trust_trajectory("hello-agent")
+    drift_events = trajectory.events_by_source("drift")
+    if drift_events:
+        drift_delta = sum(e.delta for e in drift_events)
+        sign = "+" if drift_delta >= 0 else ""
+        color = _red if drift_delta < 0 else _green
+        print(f"    Drift affected trust {len(drift_events)} times (net: {color(f'{sign}{drift_delta:.3f}')})")
+        for e in drift_events[-3:]:
+            print(f"      {e.source}: {e.reason}")
+    else:
+        print(f"    Trust at max ({trust_after_drift:.2f}) — drift confidence too low to erode")
+        print(f"    (Drift adjustments scale by confidence; low sample sizes reduce effect)")
+    print(f"    Current trust: {trust_after_drift:.2f}")
+
+    # Trust trajectory report (Phase 4C)
+    print()
+    print(_bold("  Trust Report:"))
+    trajectory = runtime.get_trust_trajectory("hello-agent")
+    report = runtime.get_trust_report("hello-agent")
+
+    print(f"    Current Trust: {report['current_trust']:.2f}")
+    traj_summary = report.get("trajectory", {})
+    print(f"    Trend: {traj_summary.get('trend', 'unknown')}")
+    print()
+
+    events = trajectory.events
+    if events:
+        show = events[-10:]
+        start_idx = len(events) - len(show)
+        print(f"    Trust trajectory (last {len(show)} of {len(events)} events):")
+        for i, e in enumerate(show):
+            idx = start_idx + i
+            sign = "+" if e.delta >= 0 else ""
+            dir_color = _green if e.delta > 0 else (_red if e.delta < 0 else _yellow)
+            print(f"      [{idx}] {e.trust_before:.2f} -> {e.trust_after:.2f}  {dir_color(f'{sign}{e.delta:.3f}')}  {e.source}")
+        print()
+
+    sources = traj_summary.get("sources", {})
+    if sources:
+        print("    Trust by source:")
+        for src, info in sorted(sources.items()):
+            nd = info.get("net_delta", 0)
+            cnt = info.get("count", 0)
+            sign = "+" if nd >= 0 else ""
+            print(f"      {src:25s} {sign}{nd:.3f} ({cnt} events)")
+    print()
+
+    # Key insight
+    drift_events = trajectory.events_by_source("drift")
+    if drift_events:
+        print(f"    Key insight: Trust was affected {len(drift_events)} times by behavioral drift.")
+        print("    Drift detection provides proactive trust adjustment before")
+        print("    individual actions start getting denied.")
     print()
 
     server.shutdown()
@@ -795,6 +843,84 @@ def _cmd_fingerprint(args: argparse.Namespace) -> None:
         print()
 
 
+def _cmd_trust(args: argparse.Namespace) -> None:
+    """Show the trust report for an agent (via API)."""
+    import urllib.request
+    import urllib.error
+
+    base_url = f"http://{args.host}:{args.port}"
+    url = f"{base_url}/v1/trust/{args.agent_id}"
+
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            print(f"No trust data for agent: {args.agent_id}", file=sys.stderr)
+            sys.exit(1)
+        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
+        print("Is the Nomotic API server running? (nomotic serve)", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Trust Report: {data['agent_id']}")
+    print(f"  Current Trust: {data['current_trust']:.2f}")
+
+    traj = data.get("trajectory", {})
+    trend = traj.get("trend", "unknown")
+    print(f"  Trend: {trend}")
+    print()
+
+    total = data.get("successful_actions", 0) + data.get("violation_count", 0)
+    print(f"  Actions: {total} total ({data.get('successful_actions', 0)} successful, {data.get('violation_count', 0)} denied)")
+    vr = data.get("violation_rate", 0)
+    print(f"  Violation Rate: {vr:.1%}")
+    print()
+
+    fp = data.get("fingerprint")
+    if fp:
+        print(f"  Fingerprint: {fp['total_observations']} observations (confidence: {fp['confidence']:.3f})")
+
+    drift = data.get("drift")
+    if drift:
+        print(f"  Drift: {drift['overall']:.2f} ({drift['severity']})")
+
+    active_alerts = data.get("active_alerts")
+    if active_alerts is not None:
+        print(f"  Active Alerts: {active_alerts}")
+    print()
+
+    # Show recent events
+    recent = traj.get("recent_events", [])
+    if recent:
+        total_events = traj.get("total_events", 0)
+        print(f"  Trust History (last {len(recent)} of {total_events} changes):")
+        for i, event in enumerate(recent):
+            idx = total_events - len(recent) + i
+            tb = event.get("trust_before", 0)
+            ta = event.get("trust_after", 0)
+            delta = event.get("delta", 0)
+            src = event.get("source", "")
+            reason = event.get("reason", "")
+            sign = "+" if delta >= 0 else ""
+            print(f"    [{idx}] {tb:.2f} -> {ta:.2f}  {sign}{delta:.3f}  {src:25s} {reason}")
+        print()
+
+    # Show trust by source
+    sources = traj.get("sources", {})
+    if sources:
+        print("  Trust by Source:")
+        for src, info in sorted(sources.items()):
+            nd = info.get("net_delta", 0)
+            cnt = info.get("count", 0)
+            sign = "+" if nd >= 0 else ""
+            print(f"    {src:25s} {sign}{nd:.3f} ({cnt} events)")
+        print()
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
     from nomotic.api import NomoticAPIServer
 
@@ -941,6 +1067,12 @@ def build_parser() -> argparse.ArgumentParser:
     drift_parser.add_argument("--host", default="127.0.0.1", help="API server host (default: 127.0.0.1)")
     drift_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
 
+    # ── trust ────────────────────────────────────────────────────
+    trust_parser = sub.add_parser("trust", help="Show trust report for an agent")
+    trust_parser.add_argument("agent_id", help="Agent identifier")
+    trust_parser.add_argument("--host", default="127.0.0.1", help="API server host (default: 127.0.0.1)")
+    trust_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
+
     # ── alerts ───────────────────────────────────────────────────
     alerts_parser = sub.add_parser("alerts", help="List drift alerts")
     alerts_parser.add_argument("--agent-id", default=None, help="Filter by agent ID")
@@ -978,6 +1110,7 @@ def main(argv: list[str] | None = None) -> None:
         "fingerprint": _cmd_fingerprint,
         "drift": _cmd_drift,
         "alerts": _cmd_alerts,
+        "trust": _cmd_trust,
     }
 
     handler = commands.get(args.command)
