@@ -43,6 +43,8 @@ class CertificateStore(Protocol):
 
     def move_to_revoked(self, certificate_id: str) -> None: ...
 
+    def list_revoked(self) -> list[AgentCertificate]: ...
+
 
 class MemoryCertificateStore:
     """In-memory certificate store.
@@ -91,6 +93,10 @@ class MemoryCertificateStore:
         cert = self._certs.pop(certificate_id, None)
         if cert is not None:
             self._revoked[certificate_id] = cert
+
+    def list_revoked(self) -> list[AgentCertificate]:
+        """Return all revoked certificates."""
+        return list(self._revoked.values())
 
 
 class FileCertificateStore:
@@ -171,6 +177,14 @@ class FileCertificateStore:
             dst = self._revoked_dir / f"{certificate_id}.json"
             dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
             src.unlink()
+
+    def list_revoked(self) -> list[AgentCertificate]:
+        """Return all revoked certificates."""
+        results: list[AgentCertificate] = []
+        for path in sorted(self._revoked_dir.glob("*.json")):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            results.append(AgentCertificate.from_dict(data))
+        return results
 
     # ── Key file helpers ─────────────────────────────────────────────
 

@@ -46,6 +46,7 @@ from nomotic.certificate import AgentCertificate, CertStatus
 from nomotic.keys import SigningKey
 from nomotic.authority import CertificateAuthority
 from nomotic.store import MemoryCertificateStore
+from nomotic.registry import ArchetypeRegistry, OrganizationRegistry, ZoneValidator
 
 __all__ = ["GovernanceRuntime", "RuntimeConfig"]
 
@@ -116,6 +117,11 @@ class GovernanceRuntime:
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
         self._cert_map: dict[str, str] = {}  # agent_id -> certificate_id
+
+        # Registries — initialized lazily
+        self._archetype_registry: ArchetypeRegistry | None = None
+        self._zone_validator: ZoneValidator | None = None
+        self._org_registry: OrganizationRegistry | None = None
 
     def evaluate(self, action: Action, context: AgentContext) -> GovernanceVerdict:
         """Evaluate an action through the full governance pipeline.
@@ -256,10 +262,39 @@ class GovernanceRuntime:
     def get_trust_profile(self, agent_id: str) -> TrustProfile:
         return self.trust_calibrator.get_profile(agent_id)
 
+    # ── Registry accessors ────────────────────────────────────────────
+
+    @property
+    def archetype_registry(self) -> ArchetypeRegistry:
+        """Lazily initialized archetype registry with defaults."""
+        if self._archetype_registry is None:
+            self._archetype_registry = ArchetypeRegistry.with_defaults()
+        return self._archetype_registry
+
+    @property
+    def zone_validator(self) -> ZoneValidator:
+        """Lazily initialized zone validator."""
+        if self._zone_validator is None:
+            self._zone_validator = ZoneValidator()
+        return self._zone_validator
+
+    @property
+    def org_registry(self) -> OrganizationRegistry:
+        """Lazily initialized organization registry."""
+        if self._org_registry is None:
+            self._org_registry = OrganizationRegistry()
+        return self._org_registry
+
     # ── Certificate integration ──────────────────────────────────────
 
     def _ensure_ca(self) -> CertificateAuthority:
-        """Lazily initialize the certificate authority."""
+        """Lazily initialize the certificate authority.
+
+        The auto-created CA does not attach registries — it is a bare
+        authority for programmatic use.  Attach registries explicitly via
+        :meth:`set_certificate_authority` or by passing a pre-configured
+        CA.
+        """
         if self._ca is None:
             sk, _vk = SigningKey.generate()
             self._ca = CertificateAuthority(

@@ -19,6 +19,18 @@ from nomotic.keys import SigningKey, VerifyKey
 from nomotic.certificate import AgentCertificate, CertStatus, CertVerifyResult, LiveVerifyResult
 from nomotic.authority import CertificateAuthority
 from nomotic.store import CertificateStore, MemoryCertificateStore, FileCertificateStore
+from nomotic.registry import (
+    ArchetypeDefinition,
+    ArchetypeRegistry,
+    FileOrgStore,
+    MemoryOrgStore,
+    OrganizationRegistry,
+    OrgRegistration,
+    OrgStatus,
+    OrgStore,
+    ValidationResult,
+    ZoneValidator,
+)
 
 __all__ = [
     "Action",
@@ -46,4 +58,14 @@ __all__ = [
     "CertificateStore",
     "MemoryCertificateStore",
     "FileCertificateStore",
+    "ArchetypeDefinition",
+    "ArchetypeRegistry",
+    "FileOrgStore",
+    "MemoryOrgStore",
+    "OrganizationRegistry",
+    "OrgRegistration",
+    "OrgStatus",
+    "OrgStore",
+    "ValidationResult",
+    "ZoneValidator",
 ]
