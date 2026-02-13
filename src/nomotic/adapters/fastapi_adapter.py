@@ -53,18 +53,8 @@ class NomoticMiddleware:
         for name, value in scope.get("headers", []):
             headers[name.decode("latin-1")] = value.decode("latin-1")
 
-        # Read body
+        # Consume the body so we can validate it, then replay for downstream.
         body = b""
-        body_chunks: list[bytes] = []
-
-        async def receive_wrapper() -> dict[str, Any]:
-            message = await receive()
-            if message.get("type") == "http.request":
-                chunk = message.get("body", b"")
-                body_chunks.append(chunk)
-            return message
-
-        # We need to consume the body to check it. Read one chunk.
         message = await receive()
         if message.get("type") == "http.request":
             body = message.get("body", b"")
@@ -94,7 +84,7 @@ class NomoticMiddleware:
                 return {
                     "type": "http.request",
                     "body": body,
-                    "more_body": not message.get("more_body", False) is False and False,
+                    "more_body": False,
                 }
             return await receive()
 
