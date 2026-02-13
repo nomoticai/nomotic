@@ -391,6 +391,165 @@ def _cmd_zone(args: argparse.Namespace) -> None:
 # ── Serve command ────────────────────────────────────────────────────────
 
 
+def _cmd_hello(args: argparse.Namespace) -> None:
+    """Run the hello-nomo governance demo (all in-memory)."""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from typing import Any
+
+    from nomotic.authority import CertificateAuthority
+    from nomotic.headers import generate_headers
+    from nomotic.middleware import GatewayConfig, NomoticGateway
+    from nomotic.sdk import GovernedAgent
+    from nomotic.store import MemoryCertificateStore
+
+    # ANSI helpers
+    _no_color = not sys.stdout.isatty()
+
+    def _c(code: str, text: str) -> str:
+        return text if _no_color else f"\033[{code}m{text}\033[0m"
+
+    def _bold(t: str) -> str:
+        return _c("1", t)
+
+    def _green(t: str) -> str:
+        return _c("32", t)
+
+    def _red(t: str) -> str:
+        return _c("31", t)
+
+    def _yellow(t: str) -> str:
+        return _c("33", t)
+
+    def _cyan(t: str) -> str:
+        return _c("36", t)
+
+    # Set up infrastructure
+    print()
+    print(_bold(_cyan("=" * 60)))
+    print(_bold(_cyan("  Nomotic Governance Demo")))
+    print(_bold(_cyan("=" * 60)))
+    print()
+
+    issuer_sk, issuer_vk = SigningKey.generate()
+    store = MemoryCertificateStore()
+    ca = CertificateAuthority(
+        issuer_id="hello-nomo-issuer",
+        signing_key=issuer_sk,
+        store=store,
+    )
+    print(f"  {_green('OK')} CertificateAuthority created")
+
+    cert, agent_sk = ca.issue(
+        agent_id="hello-agent",
+        archetype="customer-experience",
+        organization="hello-corp",
+        zone_path="global/us",
+    )
+    print(f"  {_green('OK')} Certificate issued: {cert.certificate_id}")
+    print(f"      Agent: hello-agent | Archetype: customer-experience")
+    print(f"      Trust: {cert.trust_score} | Age: {cert.behavioral_age}")
+
+    gateway = NomoticGateway(config=GatewayConfig(
+        require_cert=True,
+        min_trust=0.3,
+        local_ca=ca,
+        verify_signature=True,
+    ))
+
+    # Tiny service handler
+    request_log: list[dict[str, Any]] = []
+
+    class _DemoHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *a: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            hdrs = {k: v for k, v in self.headers.items()}
+            result = gateway.check(hdrs)
+            request_log.append({"allowed": result.allowed, "reason": result.reason})
+            if not result.allowed:
+                body = json.dumps(result.to_dict()).encode()
+                self.send_response(403)
+            else:
+                body = json.dumps({"status": "ok", "trust": result.trust_score}).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("127.0.0.1", 0), _DemoHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"  {_green('OK')} Service running on http://127.0.0.1:{port}")
+
+    agent = GovernedAgent(
+        certificate=cert,
+        signing_key=agent_sk,
+        base_url=f"http://127.0.0.1:{port}",
+    )
+
+    # Normal requests
+    print()
+    print(_bold("  Normal operations:"))
+    trust_history = [cert.trust_score]
+    for i in range(5):
+        resp = agent.get("/api/data")
+        ca.record_action(cert.certificate_id, min(0.95, cert.trust_score + 0.05))
+        trust_history.append(cert.trust_score)
+        status = _green(str(resp.status)) if resp.ok else _red(str(resp.status))
+        print(f"    [{i+1}] GET /api/data -> {status}  trust={_green(f'{cert.trust_score:.2f}')}")
+        # Recreate agent to pick up new trust in headers
+        agent = GovernedAgent(
+            certificate=cert, signing_key=agent_sk,
+            base_url=f"http://127.0.0.1:{port}",
+        )
+
+    # Trust drop
+    print()
+    print(_bold("  Trust degradation:"))
+    ca.update_trust(cert.certificate_id, 0.2)
+    trust_history.append(cert.trust_score)
+    agent = GovernedAgent(
+        certificate=cert, signing_key=agent_sk,
+        base_url=f"http://127.0.0.1:{port}",
+    )
+    resp = agent.get("/api/data")
+    status = _green(str(resp.status)) if resp.ok else _red(str(resp.status))
+    print(f"    Trust dropped to {_red(f'{cert.trust_score:.2f}')} -> {status} (gateway denies below 0.30)")
+
+    # Recovery
+    ca.update_trust(cert.certificate_id, 0.6)
+    trust_history.append(cert.trust_score)
+    agent = GovernedAgent(
+        certificate=cert, signing_key=agent_sk,
+        base_url=f"http://127.0.0.1:{port}",
+    )
+    resp = agent.get("/api/data")
+    status = _green(str(resp.status)) if resp.ok else _red(str(resp.status))
+    print(f"    Trust restored to {_green(f'{cert.trust_score:.2f}')} -> {status} (access restored)")
+
+    # Summary
+    print()
+    print(_bold("  Trust trajectory:"))
+    for i, t in enumerate(trust_history):
+        bar_len = int(t * 30)
+        bar = "#" * bar_len + "." * (30 - bar_len)
+        color = _green if t >= 0.5 else (_yellow if t >= 0.3 else _red)
+        print(f"    [{i:2d}] {color(f'{t:.2f}')} |{bar}|")
+
+    allowed = sum(1 for r in request_log if r["allowed"])
+    denied = len(request_log) - allowed
+    print()
+    print(f"  Requests: {len(request_log)} total, {_green(str(allowed))} allowed, {_red(str(denied))} denied")
+    print()
+
+    server.shutdown()
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
     from nomotic.api import NomoticAPIServer
 
@@ -521,6 +680,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     serve.add_argument("--port", type=int, default=8420, help="Bind port (default: 8420)")
 
+    # ── hello ────────────────────────────────────────────────────────
+    sub.add_parser("hello", help="Run the hello-nomo governance demo (in-memory)")
+
     return parser
 
 
@@ -547,6 +709,7 @@ def main(argv: list[str] | None = None) -> None:
         "org": _cmd_org,
         "zone": _cmd_zone,
         "serve": _cmd_serve,
+        "hello": _cmd_hello,
     }
 
     handler = commands.get(args.command)
