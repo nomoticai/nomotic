@@ -14,6 +14,7 @@ def _cert(cert_id: str = "nmc-test-1", **overrides) -> AgentCertificate:
     defaults = {
         "certificate_id": cert_id,
         "agent_id": "agent-1",
+        "owner": "ops@acme.com",
         "archetype": "customer-experience",
         "organization": "acme",
         "zone_path": "global/us",

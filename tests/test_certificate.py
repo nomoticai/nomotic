@@ -13,6 +13,7 @@ def _make_cert(**overrides) -> AgentCertificate:
     defaults = {
         "certificate_id": "nmc-test-1234",
         "agent_id": "agent-1",
+        "owner": "alice@acme.com",
         "archetype": "customer-experience",
         "organization": "acme-corp",
         "zone_path": "global/us/acme-corp/retail",
@@ -83,6 +84,7 @@ class TestCertificateSerialization:
         restored = AgentCertificate.from_json(json_str)
         assert restored.certificate_id == cert.certificate_id
         assert restored.agent_id == cert.agent_id
+        assert restored.owner == cert.owner
         assert restored.archetype == cert.archetype
         assert restored.organization == cert.organization
         assert restored.zone_path == cert.zone_path
@@ -136,6 +138,7 @@ class TestCertificateSerialization:
         # Must include identity fields
         assert "certificate_id" in d
         assert "agent_id" in d
+        assert "owner" in d
         assert "archetype" in d
         assert "organization" in d
         assert "zone_path" in d

@@ -5,6 +5,7 @@ certificate identity and request signatures through HTTP.
 
 Headers:
     X-Nomotic-Cert-ID      certificate_id
+    X-Nomotic-Owner        owner
     X-Nomotic-Trust        trust_score
     X-Nomotic-Age          behavioral_age
     X-Nomotic-Archetype    archetype
@@ -32,6 +33,7 @@ __all__ = [
 
 # Header name constants
 _HDR_CERT_ID = "X-Nomotic-Cert-ID"
+_HDR_OWNER = "X-Nomotic-Owner"
 _HDR_TRUST = "X-Nomotic-Trust"
 _HDR_AGE = "X-Nomotic-Age"
 _HDR_ARCHETYPE = "X-Nomotic-Archetype"
@@ -45,6 +47,7 @@ class CertificateHeaders:
     """Parsed Nomotic HTTP headers."""
 
     certificate_id: str
+    owner: str
     trust_score: float
     behavioral_age: int
     archetype: str
@@ -75,6 +78,7 @@ def generate_headers(
     signature = signing_key.sign(request_body)
     return {
         _HDR_CERT_ID: certificate.certificate_id,
+        _HDR_OWNER: certificate.owner,
         _HDR_TRUST: str(certificate.trust_score),
         _HDR_AGE: str(certificate.behavioral_age),
         _HDR_ARCHETYPE: certificate.archetype,
@@ -91,6 +95,7 @@ def parse_headers(headers: dict[str, str]) -> CertificateHeaders:
     """
     return CertificateHeaders(
         certificate_id=headers[_HDR_CERT_ID],
+        owner=headers[_HDR_OWNER],
         trust_score=float(headers[_HDR_TRUST]),
         behavioral_age=int(headers[_HDR_AGE]),
         archetype=headers[_HDR_ARCHETYPE],

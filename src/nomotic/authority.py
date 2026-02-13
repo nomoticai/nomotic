@@ -79,6 +79,7 @@ class CertificateAuthority:
         organization: str,
         zone_path: str,
         *,
+        owner: str = "",
         expires_in: timedelta | None = None,
         lineage: str | None = None,
         governance_config: dict[str, Any] | None = None,
@@ -88,6 +89,10 @@ class CertificateAuthority:
         Generates an agent key pair, creates the certificate with baseline
         trust and zero behavioral age, signs it with the issuer key, and
         stores it.
+
+        *owner* is the person or entity accountable for this agent — who
+        birthed it, who gets notified on status changes, and who answers
+        for its actions.
 
         Returns the certificate and the agent's private signing key.
         The caller is responsible for storing the private key securely.
@@ -104,6 +109,7 @@ class CertificateAuthority:
         cert = AgentCertificate(
             certificate_id=_generate_cert_id(),
             agent_id=agent_id,
+            owner=owner,
             archetype=archetype,
             organization=organization,
             zone_path=zone_path,
@@ -247,6 +253,7 @@ class CertificateAuthority:
             archetype=old.archetype,
             organization=old.organization,
             zone_path=old.zone_path,
+            owner=old.owner,
             lineage=old.certificate_id,
         )
         # Carry forward earned reputation

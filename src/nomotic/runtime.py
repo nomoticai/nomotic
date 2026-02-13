@@ -279,6 +279,8 @@ class GovernanceRuntime:
         archetype: str,
         organization: str,
         zone_path: str,
+        *,
+        owner: str = "",
         **opts: Any,
     ) -> AgentCertificate:
         """Issue a birth certificate for an agent through the runtime.
@@ -292,6 +294,7 @@ class GovernanceRuntime:
             archetype=archetype,
             organization=organization,
             zone_path=zone_path,
+            owner=owner,
             **opts,
         )
         self._cert_map[agent_id] = cert.certificate_id
