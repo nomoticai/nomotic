@@ -84,6 +84,7 @@ _CONTEXT_PROFILE_ACTION_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/(summary|r
 _CONTEXT_PROFILE_STEP_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/workflow/step$")
 _WORKFLOW_GOV_RE = re.compile(r"^/v1/workflow/([^/]+)/(assessment|dependencies|projection|drift)$")
 _WORKFLOW_GOV_STEP_RE = re.compile(r"^/v1/workflow/([^/]+)/assess-step$")
+_ETHICS_REASONING_RE = re.compile(r"^/v1/ethics/reasoning/([^/]+)$")
 
 
 # ── Request handler ─────────────────────────────────────────────────────
@@ -351,6 +352,29 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._handle_update_context_profile(ctx, profile_id)
             if method == "DELETE":
                 return self._handle_close_context_profile(ctx, profile_id)
+
+        # ── Phase 8: Ethical Governance Infrastructure ─────────────────
+        if path == "/v1/equity/report" and method == "GET":
+            return self._handle_equity_report(ctx)
+        if path == "/v1/equity/config" and method == "GET":
+            return self._handle_equity_config_get(ctx)
+        if path == "/v1/equity/config" and method == "PUT":
+            return self._handle_equity_config_put(ctx)
+        if path == "/v1/bias/report" and method == "GET":
+            return self._handle_bias_report(ctx)
+        m = _ETHICS_REASONING_RE.match(path)
+        if m and method == "GET":
+            return self._handle_ethics_reasoning(ctx, m.group(1))
+        if path == "/v1/signals/cross-dimensional" and method == "GET":
+            return self._handle_cross_dimensional_signals(ctx)
+        if path == "/v1/signals/patterns" and method == "GET":
+            return self._handle_list_patterns(ctx)
+        if path == "/v1/signals/patterns" and method == "POST":
+            return self._handle_add_pattern(ctx)
+        if path == "/v1/anonymization/policy" and method == "GET":
+            return self._handle_anonymization_policy_get(ctx)
+        if path == "/v1/anonymization/policy" and method == "PUT":
+            return self._handle_anonymization_policy_put(ctx)
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -1336,6 +1360,168 @@ class _Handler(BaseHTTPRequestHandler):
         if not closed:
             return _error(404, "not_found", f"Context profile not found: {profile_id}")
         return 200, _json_bytes({"closed": True, "profile_id": profile_id})
+
+    # ── Phase 8: Ethical Governance Infrastructure ──────────────────────
+
+    def _handle_equity_report(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/equity/report — Run equity analysis."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Equity analysis requires a GovernanceRuntime")
+        if ctx.runtime.equity_analyzer is None:
+            return _error(404, "not_found", "Equity analysis not configured (provide equity_config)")
+        params = self._query_params()
+        agent_id = params.get("agent_id")
+        method = params.get("method")
+        window_hours = None
+        if "window_hours" in params:
+            try:
+                window_hours = int(params["window_hours"])
+            except ValueError:
+                pass
+        try:
+            report = ctx.runtime.run_equity_analysis(
+                agent_id=agent_id, method=method, window_hours=window_hours,
+            )
+        except ValueError as exc:
+            return _error(400, "validation_error", str(exc))
+        return 200, _json_bytes(report.to_dict())
+
+    def _handle_equity_config_get(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/equity/config — Current equity configuration."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Equity config requires a GovernanceRuntime")
+        if ctx.runtime.equity_analyzer is None:
+            return _error(404, "not_found", "Equity analysis not configured")
+        return 200, _json_bytes(ctx.runtime.equity_analyzer.config.to_dict())
+
+    def _handle_equity_config_put(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """PUT /v1/equity/config — Update equity configuration."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Equity config requires a GovernanceRuntime")
+        if ctx.runtime.equity_analyzer is None:
+            return _error(404, "not_found", "Equity analysis not configured")
+        data = self._read_json()
+        from nomotic.equity import EquityConfig
+        try:
+            config = EquityConfig.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid equity config: {exc}")
+        ctx.runtime.equity_analyzer.update_config(config)
+        # Record provenance
+        if hasattr(ctx.runtime, '_record_provenance'):
+            ctx.runtime._record_provenance(
+                actor="api",
+                target_type="equity_config",
+                target_id="equity",
+                change_type="modify",
+                new_value=data,
+                reason="Updated via API",
+                context_code="CONFIG.THRESHOLD_CHANGED",
+            )
+        return 200, _json_bytes(config.to_dict())
+
+    def _handle_bias_report(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/bias/report — Run governance bias assessment."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Bias detection requires a GovernanceRuntime")
+        if ctx.runtime.bias_detector is None:
+            return _error(404, "not_found", "Bias detection not configured (provide equity_config)")
+        try:
+            report = ctx.runtime.run_bias_assessment()
+        except ValueError as exc:
+            return _error(400, "validation_error", str(exc))
+        return 200, _json_bytes(report.to_dict())
+
+    def _handle_ethics_reasoning(self, ctx: _ServerContext, artifact_id: str) -> tuple[int, bytes]:
+        """GET /v1/ethics/reasoning/{artifact_id} — Ethical reasoning assessment."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        if ctx.evaluator._ethical_reasoning_config is None:
+            return _error(404, "not_found", "Ethical reasoning evaluation not configured")
+        # Look up artifact by hash
+        artifact = ctx.evaluator._artifact_store.get(artifact_id)
+        if artifact is None:
+            return _error(404, "not_found", f"Artifact not found: {artifact_id}")
+        assessment = ctx.evaluator._assess_ethical_reasoning(
+            artifact, ctx.evaluator._ethical_reasoning_config,
+        )
+        return 200, _json_bytes(assessment.to_dict())
+
+    def _handle_cross_dimensional_signals(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/signals/cross-dimensional — Aggregate cross-dimensional signals."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Cross-dimensional analysis requires a GovernanceRuntime")
+        if ctx.runtime.cross_dimensional_detector is None:
+            return _error(404, "not_found", "Cross-dimensional detection not enabled")
+        params = self._query_params()
+        agent_id = params.get("agent_id")
+        window_hours = 168
+        if "window_hours" in params:
+            try:
+                window_hours = int(params["window_hours"])
+            except ValueError:
+                pass
+        try:
+            report = ctx.runtime.get_cross_dimensional_signals(
+                agent_id=agent_id, window_hours=window_hours,
+            )
+        except ValueError as exc:
+            return _error(400, "validation_error", str(exc))
+        return 200, _json_bytes(report.to_dict())
+
+    def _handle_list_patterns(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/signals/patterns — List active cross-dimensional patterns."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Patterns require a GovernanceRuntime")
+        if ctx.runtime.cross_dimensional_detector is None:
+            return _error(404, "not_found", "Cross-dimensional detection not enabled")
+        patterns = ctx.runtime.cross_dimensional_detector.list_patterns()
+        return 200, _json_bytes({"patterns": patterns, "total": len(patterns)})
+
+    def _handle_add_pattern(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/signals/patterns — Add custom cross-dimensional pattern."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Patterns require a GovernanceRuntime")
+        if ctx.runtime.cross_dimensional_detector is None:
+            return _error(404, "not_found", "Cross-dimensional detection not enabled")
+        data = self._read_json()
+        try:
+            ctx.runtime.cross_dimensional_detector.add_pattern(data)
+        except ValueError as exc:
+            return _error(400, "validation_error", str(exc))
+        return 201, _json_bytes({"added": True, "pattern": data.get("name", "")})
+
+    def _handle_anonymization_policy_get(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/anonymization/policy — Current anonymization policy."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Anonymization requires a GovernanceRuntime")
+        if ctx.runtime.anonymization_policy is None:
+            return 200, _json_bytes({"rules": [], "default_hide": False})
+        return 200, _json_bytes(ctx.runtime.anonymization_policy.to_dict())
+
+    def _handle_anonymization_policy_put(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """PUT /v1/anonymization/policy — Update anonymization policy."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Anonymization requires a GovernanceRuntime")
+        data = self._read_json()
+        from nomotic.equity import AnonymizationPolicy
+        try:
+            policy = AnonymizationPolicy.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid anonymization policy: {exc}")
+        ctx.runtime.anonymization_policy = policy
+        # Record provenance
+        if hasattr(ctx.runtime, '_record_provenance'):
+            ctx.runtime._record_provenance(
+                actor="api",
+                target_type="anonymization_policy",
+                target_id="anonymization",
+                change_type="modify",
+                new_value=data,
+                reason="Updated via API",
+                context_code="CONFIG.THRESHOLD_CHANGED",
+            )
+        return 200, _json_bytes(policy.to_dict())
 
     def _handle_list_context_profiles(self, ctx: _ServerContext) -> tuple[int, bytes]:
         """GET /v1/context — List profiles with filters."""

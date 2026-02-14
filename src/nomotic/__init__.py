@@ -68,7 +68,37 @@ from nomotic.protocol import (
     validate_artifact,
 )
 from nomotic.token import GovernanceToken, TokenClaims, TokenValidationResult, TokenValidator
-from nomotic.evaluator import EvaluatorConfig, PostHocAssessment, ProtocolEvaluator
+from nomotic.evaluator import (
+    EthicalReasoningAssessment,
+    EthicalReasoningConfig,
+    EvaluatorConfig,
+    PostHocAssessment,
+    ProtocolEvaluator,
+)
+from nomotic.equity import (
+    AnonymizationPolicy,
+    AnonymizationRule,
+    DisparityFinding,
+    EquityAnalyzer,
+    EquityConfig,
+    EquityReport,
+    EquityThreshold,
+    GroupOutcome,
+    ProtectedAttribute,
+    ProxyAlert,
+)
+from nomotic.bias import (
+    BiasDetector,
+    GovernanceBiasReport,
+    RuleBiasAssessment,
+    StructuralConcern,
+)
+from nomotic.cross_dimensional import (
+    CROSS_DIMENSIONAL_PATTERNS,
+    CrossDimensionalDetector,
+    CrossDimensionalReport,
+    CrossDimensionalSignal,
+)
 from nomotic.contextual_modifier import (
     ContextConstraint,
     ContextModification,
@@ -206,9 +236,32 @@ __all__ = [
     "TokenClaims",
     "TokenValidationResult",
     "TokenValidator",
+    "EthicalReasoningAssessment",
+    "EthicalReasoningConfig",
     "EvaluatorConfig",
     "PostHocAssessment",
     "ProtocolEvaluator",
+    # Equity Analysis (Phase 8)
+    "AnonymizationPolicy",
+    "AnonymizationRule",
+    "DisparityFinding",
+    "EquityAnalyzer",
+    "EquityConfig",
+    "EquityReport",
+    "EquityThreshold",
+    "GroupOutcome",
+    "ProtectedAttribute",
+    "ProxyAlert",
+    # Bias Detection (Phase 8)
+    "BiasDetector",
+    "GovernanceBiasReport",
+    "RuleBiasAssessment",
+    "StructuralConcern",
+    # Cross-Dimensional Signals (Phase 8)
+    "CROSS_DIMENSIONAL_PATTERNS",
+    "CrossDimensionalDetector",
+    "CrossDimensionalReport",
+    "CrossDimensionalSignal",
     # Contextual Modifier (Phase 7B)
     "ContextConstraint",
     "ContextModification",
