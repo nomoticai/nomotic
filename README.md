@@ -554,4 +554,4 @@ For the full conceptual foundation, see the [Nomotic AI position paper](docs/Nom
 
 ## License
 
-MIT
+Apache 2.0
