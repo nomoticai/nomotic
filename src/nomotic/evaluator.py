@@ -179,6 +179,9 @@ class ProtocolEvaluator:
             assessment.dimensional_summary = dim_summary
             assessment.ucs = ucs_score
             assessment.trust_state = trust_state
+            # Capture context modifications (Phase 7B)
+            if "context_modification" in dim_result:
+                assessment.metadata["context_modifications"] = dim_result["context_modification"].to_dict()
 
         # Step 4: Determine verdict
         verdict, conditions, guidance, escalation, denial = self._determine_verdict(
@@ -600,6 +603,7 @@ class ProtocolEvaluator:
             agent_id=artifact.agent_id,
             trust_profile=trust_profile,
             session_id=artifact.session_id or uuid.uuid4().hex[:12],
+            context_profile_id=getattr(artifact, "context_profile_id", None),
         )
 
         # Run the governance evaluation
@@ -611,7 +615,7 @@ class ProtocolEvaluator:
             # Normalize dimension name to snake_case for consistency
             dim_summary[score.dimension_name] = round(score.score, 4)
 
-        return {
+        result: dict[str, Any] = {
             "dimensional_summary": dim_summary,
             "ucs": round(gov_verdict.ucs, 4),
             "trust_state": round(trust_profile.overall_trust, 4),
@@ -619,6 +623,10 @@ class ProtocolEvaluator:
             "vetoed_by": gov_verdict.vetoed_by,
             "tier": gov_verdict.tier,
         }
+        # Include context modifications if present (Phase 7B)
+        if gov_verdict.context_modification is not None:
+            result["context_modification"] = gov_verdict.context_modification
+        return result
 
     def _determine_verdict(
         self,

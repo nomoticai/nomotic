@@ -68,6 +68,8 @@ class RuntimeConfig:
     enable_audit: bool = True
     audit_max_records: int = 10000
     provenance_max_records: int = 5000
+    enable_contextual_modifier: bool = True
+    modifier_config: Any = None  # ModifierConfig from contextual_modifier
 
 
 class GovernanceRuntime:
@@ -167,6 +169,15 @@ class GovernanceRuntime:
         from nomotic.context_profile import ContextProfileManager
         self.context_profiles = ContextProfileManager()
 
+        # Contextual modifier (Phase 7B)
+        if self.config.enable_contextual_modifier:
+            from nomotic.contextual_modifier import ContextualModifier
+            self.contextual_modifier: ContextualModifier | None = ContextualModifier(
+                config=self.config.modifier_config,
+            )
+        else:
+            self.contextual_modifier = None
+
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
         self._cert_map: dict[str, str] = {}  # agent_id -> certificate_id
@@ -188,37 +199,73 @@ class GovernanceRuntime:
         self.trust_calibrator.apply_time_decay(context.agent_id)
         context.trust_profile = self.trust_calibrator.get_profile(context.agent_id)
 
-        # Step 2: Evaluate all 13 dimensions simultaneously
-        scores = self.registry.evaluate_all(action, context)
+        # Step 1b: Apply contextual modifier (Phase 7B)
+        context_modification = None
+        original_weights: dict[str, float] = {}
+        if (
+            self.contextual_modifier is not None
+            and context.context_profile_id is not None
+        ):
+            profile = self.context_profiles.get_profile(context.context_profile_id)
+            if profile is not None:
+                context_modification = self.contextual_modifier.modify(
+                    action, context, profile,
+                )
+                # Apply weight adjustments temporarily
+                if context_modification.weight_adjustments:
+                    original_weights = self._apply_weight_adjustments(
+                        context_modification.weight_adjustments,
+                    )
+                # Apply trust modifier
+                if context_modification.trust_modifier != 0.0:
+                    context.trust_profile.overall_trust = max(
+                        0.0,
+                        min(
+                            1.0,
+                            context.trust_profile.overall_trust
+                            + context_modification.trust_modifier,
+                        ),
+                    )
 
-        # Step 3: Tier 1 — deterministic gate
-        tier1_result = self.tier_one.evaluate(action, context, scores)
-        if tier1_result.decided:
-            verdict = tier1_result.verdict
+        try:
+            # Step 2: Evaluate all 13 dimensions simultaneously
+            scores = self.registry.evaluate_all(action, context)
+
+            # Step 3: Tier 1 — deterministic gate
+            tier1_result = self.tier_one.evaluate(action, context, scores)
+            if tier1_result.decided:
+                verdict = tier1_result.verdict
+                assert verdict is not None
+                verdict.evaluation_time_ms = (time.time() - start) * 1000
+                verdict.context_modification = context_modification
+                self._record_verdict(action, context, verdict)
+                return verdict
+
+            # Step 4: Compute UCS for Tier 2
+            ucs = self.ucs_engine.compute(scores, context.trust_profile)
+
+            # Step 5: Tier 2 — weighted evaluation
+            tier2_result = self.tier_two.evaluate(action, context, scores, ucs)
+            if tier2_result.decided:
+                verdict = tier2_result.verdict
+                assert verdict is not None
+                verdict.evaluation_time_ms = (time.time() - start) * 1000
+                verdict.context_modification = context_modification
+                self._record_verdict(action, context, verdict)
+                return verdict
+
+            # Step 6: Tier 3 — deliberative review
+            tier3_result = self.tier_three.evaluate(action, context, scores, ucs)
+            verdict = tier3_result.verdict
             assert verdict is not None
             verdict.evaluation_time_ms = (time.time() - start) * 1000
+            verdict.context_modification = context_modification
             self._record_verdict(action, context, verdict)
             return verdict
-
-        # Step 4: Compute UCS for Tier 2
-        ucs = self.ucs_engine.compute(scores, context.trust_profile)
-
-        # Step 5: Tier 2 — weighted evaluation
-        tier2_result = self.tier_two.evaluate(action, context, scores, ucs)
-        if tier2_result.decided:
-            verdict = tier2_result.verdict
-            assert verdict is not None
-            verdict.evaluation_time_ms = (time.time() - start) * 1000
-            self._record_verdict(action, context, verdict)
-            return verdict
-
-        # Step 6: Tier 3 — deliberative review
-        tier3_result = self.tier_three.evaluate(action, context, scores, ucs)
-        verdict = tier3_result.verdict
-        assert verdict is not None
-        verdict.evaluation_time_ms = (time.time() - start) * 1000
-        self._record_verdict(action, context, verdict)
-        return verdict
+        finally:
+            # Restore original weights — per-evaluation only, never persistent
+            if original_weights:
+                self._restore_weights(original_weights)
 
     def begin_execution(
         self,
@@ -647,6 +694,11 @@ class GovernanceRuntime:
                     context.user_context.request_hash
                     if context.user_context else ""
                 ),
+                "context_modification": (
+                    verdict.context_modification.to_dict()
+                    if verdict.context_modification is not None
+                    else None
+                ),
             },
         )
         assert self._audit_trail is not None
@@ -866,6 +918,40 @@ class GovernanceRuntime:
         """Create a new context profile for an agent."""
         from nomotic.context_profile import ContextProfile
         return self.context_profiles.create_profile(agent_id, **kwargs)
+
+    # ── Contextual modifier helpers (Phase 7B) ─────────────────────
+
+    def _apply_weight_adjustments(
+        self,
+        adjustments: list[Any],
+    ) -> dict[str, float]:
+        """Apply weight adjustments from the contextual modifier.
+
+        Returns a dict of original weights so they can be restored after
+        evaluation. Adjustments to the same dimension accumulate (the
+        deltas are summed). Final weights are clamped to [0.1, 3.0].
+        """
+        # Collect per-dimension deltas
+        deltas: dict[str, float] = {}
+        for adj in adjustments:
+            delta = adj.adjusted_weight - adj.original_weight
+            deltas[adj.dimension_name] = deltas.get(adj.dimension_name, 0.0) + delta
+
+        originals: dict[str, float] = {}
+        for dim_name, total_delta in deltas.items():
+            dim = self.registry.get(dim_name)
+            if dim is not None:
+                originals[dim_name] = dim.weight
+                new_weight = dim.weight + total_delta
+                dim.weight = max(0.1, min(3.0, new_weight))
+        return originals
+
+    def _restore_weights(self, original_weights: dict[str, float]) -> None:
+        """Restore dimension weights after a context-modified evaluation."""
+        for dim_name, original_weight in original_weights.items():
+            dim = self.registry.get(dim_name)
+            if dim is not None:
+                dim.weight = original_weight
 
     def _append_history(self, agent_id: str, record: ActionRecord) -> None:
         history = self._action_history.setdefault(agent_id, [])
