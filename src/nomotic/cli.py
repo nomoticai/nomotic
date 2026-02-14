@@ -1141,6 +1141,1278 @@ def _cmd_owner(args: argparse.Namespace) -> None:
             print(f"    {a['detail']}")
 
 
+def _cmd_scope(args: argparse.Namespace) -> None:
+    """Configure or view an agent's authorized scope."""
+    from nomotic.sandbox import (
+        AgentConfig,
+        load_agent_config,
+        save_agent_config,
+    )
+
+    agent_id = args.agent_id
+    sub = args.scope_command
+
+    if sub == "set":
+        config = load_agent_config(args.base_dir, agent_id) or AgentConfig(agent_id=agent_id)
+        if args.actions:
+            config.actions = [a.strip() for a in args.actions.split(",")]
+        if args.boundaries:
+            config.boundaries = [b.strip() for b in args.boundaries.split(",")]
+        save_agent_config(args.base_dir, config)
+
+        print(f"Scope configured for {agent_id}:")
+        print(f"  Allowed actions:  {', '.join(config.actions)}")
+        print(f"  Boundaries:       {', '.join(config.boundaries)}")
+        print()
+        _print_authority_envelope(agent_id, config)
+
+    elif sub == "show":
+        config = load_agent_config(args.base_dir, agent_id)
+        if config is None:
+            print(f"No configuration found for agent: {agent_id}", file=sys.stderr)
+            sys.exit(1)
+        _print_authority_envelope(agent_id, config)
+
+    else:
+        print("Unknown scope subcommand. Use 'set' or 'show'.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _print_authority_envelope(agent_id: str, config: "AgentConfig") -> None:
+    """Print the formatted authority envelope box."""
+    _no_color = not sys.stdout.isatty()
+
+    def _c(code: str, text: str) -> str:
+        return text if _no_color else f"\033[{code}m{text}\033[0m"
+
+    def _bold(t: str) -> str:
+        return _c("1", t)
+
+    def _green(t: str) -> str:
+        return _c("32", t)
+
+    actions_str = "  ".join(config.actions) if config.actions else "(none)"
+    boundaries = config.boundaries or []
+
+    width = 45
+    print(f"  {'':>{0}}{_bold(chr(9484))}{chr(9472) * width}{_bold(chr(9488))}")
+    print(f"  {_bold(chr(9474))}  {agent_id} Authority Envelope{' ' * (width - len(agent_id) - 22)}{_bold(chr(9474))}")
+    print(f"  {_bold(chr(9474))}{' ' * width}{_bold(chr(9474))}")
+    print(f"  {_bold(chr(9474))}  Actions: {actions_str}{' ' * max(0, width - len(actions_str) - 12)}{_bold(chr(9474))}")
+    print(f"  {_bold(chr(9474))}{' ' * width}{_bold(chr(9474))}")
+    if boundaries:
+        print(f"  {_bold(chr(9474))}  Can touch:{' ' * (width - 13)}{_bold(chr(9474))}")
+        for b in boundaries:
+            line = f"    {_green(chr(10003))} {b}"
+            # Count visible chars (without ANSI)
+            visible_len = len(f"    {chr(10003)} {b}")
+            pad = width - visible_len - 2
+            print(f"  {_bold(chr(9474))}  {line}{' ' * max(0, pad)}{_bold(chr(9474))}")
+    else:
+        print(f"  {_bold(chr(9474))}  Boundaries: (none){' ' * (width - 22)}{_bold(chr(9474))}")
+    print(f"  {_bold(chr(9474))}{' ' * width}{_bold(chr(9474))}")
+    print(f"  {_bold(chr(9474))}  Cannot touch: everything else{' ' * (width - 33)}{_bold(chr(9474))}")
+    print(f"  {_bold(chr(9492))}{chr(9472) * width}{_bold(chr(9496))}")
+
+
+def _cmd_rule(args: argparse.Namespace) -> None:
+    """Add governance rules to an agent."""
+    from nomotic.sandbox import (
+        AgentConfig,
+        EthicalRuleSpec,
+        HumanOverrideSpec,
+        load_agent_config,
+        save_agent_config,
+    )
+
+    agent_id = args.agent_id
+    config = load_agent_config(args.base_dir, agent_id) or AgentConfig(agent_id=agent_id)
+
+    if args.rule_command != "add":
+        print("Unknown rule subcommand. Use 'add'.", file=sys.stderr)
+        sys.exit(1)
+
+    rule_type = args.type
+
+    if rule_type == "ethical":
+        if not args.condition:
+            print("--condition is required for ethical rules", file=sys.stderr)
+            sys.exit(1)
+        if not args.message:
+            print("--message is required for ethical rules", file=sys.stderr)
+            sys.exit(1)
+        rule = EthicalRuleSpec(
+            condition=args.condition,
+            message=args.message,
+            name=getattr(args, "name", "") or "",
+        )
+        config.ethical_rules.append(rule)
+        save_agent_config(args.base_dir, config)
+
+        print(f"Ethical rule added:")
+        print(f"  Agent: {agent_id}")
+        print(f"  Rule:  {rule.condition}")
+        print(f"  If violated: \"{rule.message}\"")
+        print(f"  Effect: VETO (cannot be overridden by score)")
+
+    elif rule_type == "human-override":
+        if not args.action:
+            print("--action is required for human-override rules", file=sys.stderr)
+            sys.exit(1)
+        override = HumanOverrideSpec(
+            action=args.action,
+            message=args.message or f"Human approval required for '{args.action}'",
+        )
+        config.human_overrides.append(override)
+        save_agent_config(args.base_dir, config)
+
+        print(f"Human override rule added:")
+        print(f"  Agent:  {agent_id}")
+        print(f"  Action: {override.action}")
+        print(f"  Effect: \"{override.message}\"")
+
+    else:
+        print(f"Unknown rule type: {rule_type}. Use 'ethical' or 'human-override'.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_config(args: argparse.Namespace) -> None:
+    """Show the complete governance configuration for an agent."""
+    from nomotic.sandbox import load_agent_config
+
+    _no_color = not sys.stdout.isatty()
+
+    def _c(code: str, text: str) -> str:
+        return text if _no_color else f"\033[{code}m{text}\033[0m"
+
+    def _bold(t: str) -> str:
+        return _c("1", t)
+
+    def _green(t: str) -> str:
+        return _c("32", t)
+
+    def _yellow(t: str) -> str:
+        return _c("33", t)
+
+    def _red(t: str) -> str:
+        return _c("31", t)
+
+    agent_id = args.agent_id
+
+    # Try to load certificate info
+    ca, _store = _build_ca(args.base_dir)
+    from nomotic.sandbox import find_agent_cert_id
+    cert_id = find_agent_cert_id(args.base_dir, agent_id)
+    cert = ca.get(cert_id) if cert_id else None
+
+    # Load governance config
+    config = load_agent_config(args.base_dir, agent_id)
+
+    print()
+    print(_bold(f"  Governance Configuration: {agent_id}"))
+    print(f"  {'=' * 50}")
+    print()
+
+    # Certificate info
+    if cert:
+        print(_bold("  Identity:"))
+        print(f"    Certificate: {cert.certificate_id}")
+        print(f"    Archetype:   {cert.archetype}")
+        print(f"    Org:         {cert.organization}")
+        print(f"    Zone:        {cert.zone_path}")
+        print(f"    Owner:       {cert.owner}")
+        print(f"    Trust:       {cert.trust_score}")
+        print(f"    Status:      {cert.status.name}")
+        print()
+    else:
+        print(_bold("  Identity:"))
+        print(f"    No certificate found for '{agent_id}'")
+        print()
+
+    if config is None:
+        print(_bold("  Authority:"))
+        print(f"    No governance configuration found.")
+        print(f"    Use 'nomotic scope set {agent_id} --actions ...' to configure.")
+        print()
+        return
+
+    # Scope
+    print(_bold("  Authority:"))
+    if config.actions:
+        print(f"    Allowed actions: {', '.join(config.actions)}")
+    else:
+        print(f"    Allowed actions: (not configured)")
+    print()
+
+    # Boundaries
+    print(_bold("  Boundaries:"))
+    if config.boundaries:
+        for b in config.boundaries:
+            print(f"    {_green(chr(10003))} {b}")
+    else:
+        print(f"    (not configured)")
+    print()
+
+    # Ethical rules
+    print(_bold("  Ethical Rules:"))
+    if config.ethical_rules:
+        for i, rule in enumerate(config.ethical_rules, 1):
+            print(f"    [{i}] {_yellow('VETO')} if: {rule.condition}")
+            print(f"        Message: \"{rule.message}\"")
+    else:
+        print(f"    (none)")
+    print()
+
+    # Human override rules
+    print(_bold("  Human Override Rules:"))
+    if config.human_overrides:
+        for i, ho in enumerate(config.human_overrides, 1):
+            print(f"    [{i}] Action '{_red(ho.action)}' requires human approval")
+            print(f"        Message: \"{ho.message}\"")
+    else:
+        print(f"    (none)")
+    print()
+
+
+def _cmd_eval(args: argparse.Namespace) -> None:
+    """Evaluate a single action against the governance pipeline."""
+    from nomotic.sandbox import (
+        AgentConfig,
+        build_sandbox_runtime,
+        load_agent_config,
+    )
+
+    _no_color = not sys.stdout.isatty()
+
+    def _c(code: str, text: str) -> str:
+        return text if _no_color else f"\033[{code}m{text}\033[0m"
+
+    def _bold(t: str) -> str:
+        return _c("1", t)
+
+    def _green(t: str) -> str:
+        return _c("32", t)
+
+    def _red(t: str) -> str:
+        return _c("31", t)
+
+    def _yellow(t: str) -> str:
+        return _c("33", t)
+
+    def _cyan(t: str) -> str:
+        return _c("36", t)
+
+    from nomotic.sandbox import format_bar
+    from nomotic.types import Action as GovAction, AgentContext as GovCtx, TrustProfile as GovTP, Verdict
+
+    agent_id = args.agent_id
+    action_type = args.action
+    target = args.target or ""
+    params = {}
+    if args.params:
+        try:
+            params = json.loads(args.params)
+        except json.JSONDecodeError:
+            print(f"Invalid JSON for --params: {args.params}", file=sys.stderr)
+            sys.exit(1)
+
+    # Load agent config
+    config = load_agent_config(args.base_dir, agent_id)
+    if config is None:
+        config = AgentConfig(agent_id=agent_id)
+
+    # Load certificate for trust
+    ca, _store = _build_ca(args.base_dir)
+    from nomotic.sandbox import find_agent_cert_id
+    cert_id = find_agent_cert_id(args.base_dir, agent_id)
+    cert = ca.get(cert_id) if cert_id else None
+    initial_trust = cert.trust_score if cert else 0.5
+
+    # Build runtime and evaluate
+    runtime = build_sandbox_runtime(agent_config=config, agent_id=agent_id)
+    trust_profile = runtime.get_trust_profile(agent_id)
+    trust_profile.overall_trust = initial_trust
+
+    action = GovAction(
+        agent_id=agent_id,
+        action_type=action_type,
+        target=target,
+        parameters=params,
+    )
+    ctx = GovCtx(agent_id=agent_id, trust_profile=trust_profile)
+
+    verdict = runtime.evaluate(action, ctx)
+
+    # Display results
+    print()
+    print(_bold(_cyan("=" * 55)))
+    print(_bold(_cyan("  GOVERNANCE EVALUATION")))
+    print(_bold(_cyan("=" * 55)))
+    print()
+    print(f"  Agent:   {agent_id}")
+    target_str = f" {chr(8594)} {target}" if target else ""
+    print(f"  Action:  {action_type}{target_str}")
+    if params:
+        print(f"  Params:  {json.dumps(params)}")
+    print()
+
+    # Dimension scores
+    print(f"  {_bold(chr(9472) * 2 + ' Dimension Scores ' + chr(9472) * 30)}")
+    print()
+
+    for ds in verdict.dimension_scores:
+        bar = format_bar(ds.score, 20)
+        name_padded = f"{ds.dimension_name:26s}"
+        score_str = f"{ds.score:.2f}"
+
+        if ds.veto and ds.score < 0.5:
+            check = _red(f"{chr(10007)} VETO: {ds.reasoning}")
+            color_score = _red(score_str)
+        elif ds.score >= 0.7:
+            check = _green(ds.reasoning)
+            color_score = _green(score_str)
+        elif ds.score >= 0.4:
+            check = _yellow(ds.reasoning)
+            color_score = _yellow(score_str)
+        else:
+            check = _red(ds.reasoning)
+            color_score = _red(score_str)
+
+        print(f"  {name_padded} {color_score}  {bar}  {check}")
+
+    # Decision
+    print()
+    print(f"  {_bold(chr(9472) * 2 + ' Decision ' + chr(9472) * 38)}")
+    print()
+
+    ucs_str = f"{verdict.ucs:.3f}"
+    tier_labels = {1: "veto gate", 2: "threshold evaluation", 3: "deliberative review"}
+    tier_label = tier_labels.get(verdict.tier, "unknown")
+
+    if verdict.verdict == Verdict.ALLOW:
+        verdict_display = _green(f"{chr(9989)} ALLOW")
+    elif verdict.verdict == Verdict.DENY:
+        verdict_display = _red(f"{chr(10060)} DENY")
+    elif verdict.verdict == Verdict.ESCALATE:
+        verdict_display = _yellow(f"{chr(9888)} ESCALATE")
+    else:
+        verdict_display = _yellow(f"{chr(9888)} {verdict.verdict.name}")
+
+    print(f"  UCS:      {ucs_str}")
+    print(f"  Tier:     {verdict.tier} ({tier_label})")
+    print(f"  Verdict:  {verdict_display}")
+    if verdict.vetoed_by:
+        print(f"  Vetoed by: {', '.join(verdict.vetoed_by)}")
+    if verdict.reasoning:
+        print(f"  Reason:   {verdict.reasoning}")
+    print(f"  Time:     {verdict.evaluation_time_ms:.1f}ms")
+
+    # Trust update
+    new_trust = runtime.get_trust_profile(agent_id).overall_trust
+    delta = new_trust - initial_trust
+    sign = "+" if delta >= 0 else ""
+    delta_color = _green if delta > 0 else (_red if delta < 0 else _yellow)
+
+    trend = "stable"
+    if delta > 0.001:
+        trend = f"{chr(8599)} rising"
+    elif delta < -0.001:
+        trend = f"{chr(8600)} falling"
+
+    print()
+    print(f"  {_bold(chr(9472) * 2 + ' Trust Update ' + chr(9472) * 34)}")
+    print()
+    print(f"  Before:   {initial_trust:.3f}")
+    print(f"  After:    {new_trust:.3f}  ({delta_color(f'{sign}{delta:.3f}')})")
+    print(f"  Trend:    {trend}")
+
+    if delta < -0.01:
+        ratio = abs(delta) / 0.01
+        print()
+        print(f"  {_yellow(chr(9888))} Note: violations cost 5x more trust than successes earn.")
+        if ratio > 1:
+            print(f"  This one denial erased ~{int(ratio)} successful actions.")
+    print()
+
+    # Update certificate trust if we have one
+    if cert is not None:
+        ca.update_trust(cert.certificate_id, new_trust)
+
+
+def _cmd_simulate(args: argparse.Namespace) -> None:
+    """Run a batch simulation of governance evaluations."""
+    from nomotic.sandbox import (
+        AgentConfig,
+        build_sandbox_runtime,
+        format_bar,
+        format_pct_bar,
+        load_agent_config,
+    )
+    from nomotic.scenarios import BUILTIN_SCENARIOS, generate_actions
+    from nomotic.types import AgentContext as GovCtx, TrustProfile as GovTP, Verdict
+
+    _no_color = not sys.stdout.isatty()
+
+    def _c(code: str, text: str) -> str:
+        return text if _no_color else f"\033[{code}m{text}\033[0m"
+
+    def _bold(t: str) -> str:
+        return _c("1", t)
+
+    def _green(t: str) -> str:
+        return _c("32", t)
+
+    def _red(t: str) -> str:
+        return _c("31", t)
+
+    def _yellow(t: str) -> str:
+        return _c("33", t)
+
+    def _cyan(t: str) -> str:
+        return _c("36", t)
+
+    agent_id = args.agent_id
+    scenario_name = args.scenario
+    count = args.count
+
+    if scenario_name not in BUILTIN_SCENARIOS:
+        print(f"Unknown scenario: {scenario_name}", file=sys.stderr)
+        print(f"Available: {', '.join(BUILTIN_SCENARIOS.keys())}", file=sys.stderr)
+        sys.exit(1)
+
+    scenario = BUILTIN_SCENARIOS[scenario_name]
+
+    # Load agent config
+    config = load_agent_config(args.base_dir, agent_id)
+    if config is None:
+        config = AgentConfig(agent_id=agent_id)
+
+    # Load initial trust from cert
+    ca, _store = _build_ca(args.base_dir)
+    from nomotic.sandbox import find_agent_cert_id
+    cert_id = find_agent_cert_id(args.base_dir, agent_id)
+    cert = ca.get(cert_id) if cert_id else None
+    initial_trust = cert.trust_score if cert else 0.5
+
+    # Build runtime
+    runtime = build_sandbox_runtime(agent_config=config, agent_id=agent_id)
+    trust_profile = runtime.get_trust_profile(agent_id)
+    trust_profile.overall_trust = initial_trust
+
+    # Generate actions
+    actions = generate_actions(agent_id, scenario, total_count=count if count else None)
+
+    # Run simulation
+    print()
+    print(f"  {_bold(f'Simulating: {scenario.description}')}")
+    print()
+
+    trust_history: list[float] = [initial_trust]
+    results = {"ALLOW": 0, "DENY": 0, "ESCALATE": 0, "MODIFY": 0}
+    current_phase = ""
+
+    for i, (action, phase_desc) in enumerate(actions):
+        if phase_desc != current_phase:
+            current_phase = phase_desc
+            print(f"  {_cyan(f'Phase: {phase_desc}')}")
+
+        ctx = GovCtx(agent_id=agent_id, trust_profile=runtime.get_trust_profile(agent_id))
+        verdict = runtime.evaluate(action, ctx)
+        results[verdict.verdict.name] = results.get(verdict.verdict.name, 0) + 1
+        trust_history.append(runtime.get_trust_profile(agent_id).overall_trust)
+
+        # Progress indicator
+        total = len(actions)
+        bar_width = 40
+        filled = int((i + 1) / total * bar_width)
+        bar = chr(9608) * filled + chr(9617) * (bar_width - filled)
+        print(f"\r  [{bar}] {i + 1}/{total}", end="", flush=True)
+
+    print()  # newline after progress bar
+    print()
+
+    # Behavioral Fingerprint
+    fp = runtime.get_fingerprint(agent_id)
+    if fp is not None:
+        print(f"  {_bold(chr(9472) * 2 + ' Behavioral Fingerprint ' + chr(9472) * 24)}")
+        print()
+        print(f"  Observations: {fp.total_observations}")
+        print(f"  Confidence:   {fp.confidence:.2f}")
+        print()
+
+        if fp.action_distribution:
+            print(f"  Action Distribution:")
+            for act, freq in sorted(fp.action_distribution.items(), key=lambda x: -x[1]):
+                bar = format_pct_bar(freq)
+                print(f"    {act:20s} {bar}  {freq:.0%}")
+            print()
+
+        if fp.target_distribution:
+            print(f"  Target Distribution:")
+            for tgt, freq in sorted(fp.target_distribution.items(), key=lambda x: -x[1]):
+                bar = format_pct_bar(freq)
+                print(f"    {tgt:20s} {bar}  {freq:.0%}")
+            print()
+
+    # Drift detection
+    drift = runtime.get_drift(agent_id)
+    if drift is not None and drift.overall > 0.05:
+        print(f"  {_bold(chr(9472) * 2 + ' Drift Detection Report ' + chr(9472) * 24)}")
+        print()
+        sev = drift.severity
+        color = _red if sev in ("high", "critical") else (_yellow if sev == "moderate" else _green)
+        print(f"  Drift Score:    {color(f'{drift.overall:.2f}')} ({sev.upper()})")
+        print(f"  JSD Divergence: {drift.action_drift:.2f}")
+        if drift.detail:
+            print(f"  Detail:         {drift.detail}")
+        print()
+
+        # Show alerts
+        alerts = runtime.get_drift_alerts(agent_id)
+        if alerts:
+            for alert in alerts:
+                sev_color = _red if alert.severity in ("critical", "high") else _yellow
+                print(f"  {sev_color(chr(9888))} DRIFT ALERT:")
+                print(f"    Severity: {alert.severity.upper()}")
+                if alert.drift_score.detail:
+                    print(f"    Message:  {alert.drift_score.detail}")
+            print()
+
+    # Trust trajectory
+    print(f"  {_bold(chr(9472) * 2 + ' Trust Trajectory ' + chr(9472) * 30)}")
+    print()
+    end_trust = trust_history[-1]
+    trend = "stable"
+    if end_trust > initial_trust + 0.02:
+        trend = "rising"
+    elif end_trust < initial_trust - 0.02:
+        trend = "falling"
+
+    print(f"  Start: {initial_trust:.3f} {chr(8594)} End: {end_trust:.3f}")
+    print(f"  Trend: {trend}")
+    print()
+
+    # Visual trust trajectory
+    n_rows = 6
+    min_t = min(trust_history)
+    max_t = max(trust_history)
+    t_range = max_t - min_t if max_t > min_t else 0.1
+    chart_width = min(40, len(trust_history))
+    step = max(1, len(trust_history) // chart_width)
+    sampled = [trust_history[i] for i in range(0, len(trust_history), step)]
+
+    for row in range(n_rows, -1, -1):
+        level = min_t + (row / n_rows) * t_range
+        label = f"  {level:.2f} |"
+        chars = []
+        for val in sampled:
+            val_row = int((val - min_t) / t_range * n_rows) if t_range > 0 else n_rows // 2
+            if val_row == row:
+                chars.append(".")
+            elif val_row > row:
+                chars.append(" ")
+            else:
+                chars.append(" ")
+        print(f"{label}{''.join(chars)}|")
+    total_actions = len(actions)
+    print(f"         {chr(9492)}{chr(9472) * len(sampled)}{chr(9496)}")
+    label_str = f"         0{' ' * (len(sampled) - len(str(total_actions)) - 1)}{total_actions}"
+    print(label_str)
+    print()
+
+    # Summary
+    allowed = results.get("ALLOW", 0)
+    denied = results.get("DENY", 0)
+    escalated = results.get("ESCALATE", 0)
+
+    print(f"  {_green(chr(10003))} {total_actions} actions evaluated")
+    print(f"  {_green(chr(10003))} {_green(str(allowed))} allowed, {_red(str(denied))} denied", end="")
+    if escalated:
+        print(f", {_yellow(str(escalated))} escalated", end="")
+    print()
+    if fp:
+        print(f"  {_green(chr(10003))} Fingerprint established")
+    print(f"  {_green(chr(10003))} Trust trajectory: {trend}")
+    print()
+
+    # Update certificate trust
+    if cert is not None:
+        ca.update_trust(cert.certificate_id, end_trust)
+
+
+def _cmd_playground(args: argparse.Namespace) -> None:
+    """Run the complete governance playground — the full developer journey."""
+    import time as _time
+
+    from nomotic.monitor import DriftConfig as _DriftConfig
+    from nomotic.runtime import GovernanceRuntime, RuntimeConfig
+    from nomotic.sandbox import (
+        AgentConfig,
+        EthicalRuleSpec,
+        HumanOverrideSpec,
+        apply_config_to_runtime,
+        format_bar,
+        format_pct_bar,
+    )
+    from nomotic.store import MemoryCertificateStore
+    from nomotic.types import Action as GovAction, AgentContext as GovCtx, TrustProfile as GovTP, Verdict
+
+    _no_color = not sys.stdout.isatty()
+    interactive = sys.stdin.isatty() and not _no_color
+
+    def _c(code: str, text: str) -> str:
+        return text if _no_color else f"\033[{code}m{text}\033[0m"
+
+    def _bold(t: str) -> str:
+        return _c("1", t)
+
+    def _green(t: str) -> str:
+        return _c("32", t)
+
+    def _red(t: str) -> str:
+        return _c("31", t)
+
+    def _yellow(t: str) -> str:
+        return _c("33", t)
+
+    def _cyan(t: str) -> str:
+        return _c("36", t)
+
+    def _dim(t: str) -> str:
+        return _c("2", t)
+
+    def _pause(msg: str = "Press Enter to continue...") -> None:
+        if interactive:
+            input(f"\n  {_dim(msg)}")
+        print()
+
+    def _header(chapter: str, title: str) -> None:
+        print()
+        print(_bold(_cyan("=" * 60)))
+        print(_bold(_cyan(f"  {chapter}: {title}")))
+        print(_bold(_cyan("=" * 60)))
+        print()
+
+    def _section(title: str) -> None:
+        print(f"  {_bold(chr(9472) * 2 + ' ' + title + ' ' + chr(9472) * max(0, 45 - len(title)))}")
+        print()
+
+    # ── Chapter 1: Identity ─────────────────────────────────────────
+
+    _header("Chapter 1", "Identity \u2014 \"Who is this agent?\"")
+
+    issuer_sk, issuer_vk = SigningKey.generate()
+    store = MemoryCertificateStore()
+    ca = CertificateAuthority(
+        issuer_id="playground-issuer",
+        signing_key=issuer_sk,
+        store=store,
+    )
+
+    cert, agent_sk = ca.issue(
+        agent_id="claims-bot",
+        archetype="customer-experience",
+        organization="acme-insurance",
+        zone_path="us/production",
+        owner="chris@acme.com",
+    )
+
+    print(f"  {_green('Certificate issued')}: {cert.certificate_id}")
+    print(f"    Agent:     {cert.agent_id}")
+    print(f"    Owner:     {cert.owner}")
+    print(f"    Archetype: {cert.archetype}")
+    print(f"    Org:       {cert.organization}")
+    print(f"    Zone:      {cert.zone_path}")
+    print(f"    Trust:     {cert.trust_score}")
+    print(f"    Age:       {cert.behavioral_age}")
+    print(f"    Status:    {cert.status.name}")
+    print(f"    Issued:    {cert.issued_at.isoformat()}")
+    print(f"    Fingerprint: {cert.fingerprint[:16]}...")
+    print()
+    print(f"  {_dim('What you learned: Every agent has an identity.')}")
+    print(f"  {_dim('It is cryptographically signed, has a human owner,')}")
+    print(f"  {_dim('lives in a governance zone, and starts with 0.50 trust.')}")
+
+    _pause()
+
+    # ── Chapter 2: Authority ────────────────────────────────────────
+
+    _header("Chapter 2", 'Authority \u2014 "What can this agent do?"')
+
+    agent_config = AgentConfig(
+        agent_id="claims-bot",
+        actions=["read", "write", "query", "assess"],
+        boundaries=["claims_db", "customer_records", "policy_db"],
+        ethical_rules=[
+            EthicalRuleSpec(
+                condition="amount <= 10000",
+                message="Claims over $10,000 require manual processing",
+                name="max-claim-amount",
+            ),
+        ],
+        human_overrides=[
+            HumanOverrideSpec(
+                action="approve",
+                message="All claim approvals require human sign-off",
+            ),
+        ],
+    )
+
+    drift_cfg = _DriftConfig(window_size=50, check_interval=10, min_observations=10)
+    runtime = GovernanceRuntime(config=RuntimeConfig(
+        enable_fingerprints=True,
+        drift_config=drift_cfg,
+    ))
+    runtime.set_certificate_authority(ca)
+    runtime._cert_map["claims-bot"] = cert.certificate_id
+
+    apply_config_to_runtime(runtime, agent_config)
+
+    # Sync initial trust
+    tp = runtime.get_trust_profile("claims-bot")
+    tp.overall_trust = cert.trust_score
+
+    print(f"  Scope configured:")
+    print(f"    Allowed actions:  {', '.join(agent_config.actions)}")
+    print(f"    Boundaries:       {', '.join(agent_config.boundaries)}")
+    print()
+    _print_authority_envelope("claims-bot", agent_config)
+    print()
+
+    print(f"  Ethical rule added:")
+    print(f"    Rule:  amount <= 10000")
+    print(f"    If violated: \"Claims over $10,000 require manual processing\"")
+    print(f"    Effect: {_red('VETO')} (cannot be overridden by score)")
+    print()
+
+    print(f"  Human override rule added:")
+    print(f"    Action '{_yellow('approve')}' requires human sign-off")
+    print()
+
+    print(f"  {_dim('What you learned: Authority is defined before the agent acts.')}")
+    print(f"  {_dim('Scope controls actions. Boundaries control resources.')}")
+    print(f"  {_dim('Rules add ethical constraints and human checkpoints.')}")
+
+    _pause()
+
+    # ── Chapter 3: Evaluation ───────────────────────────────────────
+
+    _header("Chapter 3", 'Evaluation \u2014 "What happens when the agent acts?"')
+
+    # Eval 1: authorized action
+    _section("Evaluating: read \u2192 claims_db")
+
+    action1 = GovAction(
+        agent_id="claims-bot",
+        action_type="read",
+        target="claims_db",
+        parameters={"claim_id": "CLM-5678"},
+    )
+    ctx1 = GovCtx(agent_id="claims-bot", trust_profile=runtime.get_trust_profile("claims-bot"))
+    trust_before1 = ctx1.trust_profile.overall_trust
+    v1 = runtime.evaluate(action1, ctx1)
+    trust_after1 = runtime.get_trust_profile("claims-bot").overall_trust
+
+    _print_evaluation(v1, trust_before1, trust_after1, _c, _bold, _green, _red, _yellow, _cyan)
+
+    _pause()
+
+    # Eval 2: unauthorized action (out of scope)
+    _section("Evaluating: delete \u2192 claims_db")
+
+    action2 = GovAction(agent_id="claims-bot", action_type="delete", target="claims_db")
+    ctx2 = GovCtx(agent_id="claims-bot", trust_profile=runtime.get_trust_profile("claims-bot"))
+    trust_before2 = ctx2.trust_profile.overall_trust
+    v2 = runtime.evaluate(action2, ctx2)
+    trust_after2 = runtime.get_trust_profile("claims-bot").overall_trust
+
+    _print_evaluation(v2, trust_before2, trust_after2, _c, _bold, _green, _red, _yellow, _cyan)
+    if v2.verdict == Verdict.DENY:
+        print(f"  {_yellow(chr(9888))} Note: violations cost 5x more trust than successes earn.")
+    print()
+
+    _pause()
+
+    # Eval 3: ethical violation
+    _section("Evaluating: write \u2192 claims_db (amount=25000)")
+
+    action3 = GovAction(
+        agent_id="claims-bot",
+        action_type="write",
+        target="claims_db",
+        parameters={"claim_id": "CLM-9999", "amount": 25000},
+    )
+    ctx3 = GovCtx(agent_id="claims-bot", trust_profile=runtime.get_trust_profile("claims-bot"))
+    trust_before3 = ctx3.trust_profile.overall_trust
+    v3 = runtime.evaluate(action3, ctx3)
+    trust_after3 = runtime.get_trust_profile("claims-bot").overall_trust
+
+    _print_evaluation(v3, trust_before3, trust_after3, _c, _bold, _green, _red, _yellow, _cyan)
+
+    _pause()
+
+    # Eval 4: boundary breach
+    _section("Evaluating: read \u2192 payroll_db (boundary breach)")
+
+    action4 = GovAction(agent_id="claims-bot", action_type="read", target="payroll_db")
+    ctx4 = GovCtx(agent_id="claims-bot", trust_profile=runtime.get_trust_profile("claims-bot"))
+    trust_before4 = ctx4.trust_profile.overall_trust
+    v4 = runtime.evaluate(action4, ctx4)
+    trust_after4 = runtime.get_trust_profile("claims-bot").overall_trust
+
+    _print_evaluation(v4, trust_before4, trust_after4, _c, _bold, _green, _red, _yellow, _cyan)
+
+    print(f"  {_dim('What you learned: Every action goes through 13 dimensions.')}")
+    print(f"  {_dim('Some dimensions can veto (instant denial).')}")
+    print(f"  {_dim('The UCS aggregates all scores into a single confidence number.')}")
+    emdash = "\u2014"
+    print(f"  {_dim('Trust updates asymmetrically ' + emdash + ' violations hurt 5x more.')}")
+
+    _pause()
+
+    # ── Chapter 4: Behavior ─────────────────────────────────────────
+
+    _header("Chapter 4", 'Behavior \u2014 "What patterns does the agent develop?"')
+
+    _section("Simulating 100 normal operations")
+
+    import random
+    normal_actions = [
+        ("read", "claims_db"),
+        ("read", "customer_records"),
+        ("query", "claims_db"),
+        ("query", "policy_db"),
+        ("write", "claims_db"),
+        ("read", "policy_db"),
+        ("assess", "claims_db"),
+    ]
+    normal_weights = [25, 15, 15, 10, 10, 15, 10]
+
+    trust_traj: list[float] = [runtime.get_trust_profile("claims-bot").overall_trust]
+
+    for i in range(100):
+        act_type, act_target = random.choices(normal_actions, weights=normal_weights, k=1)[0]
+        params = {}
+        if act_type == "write":
+            params = {"claim_id": f"CLM-{random.randint(1000, 9999)}", "amount": random.randint(500, 9000)}
+        elif act_type == "assess":
+            params = {"claim_id": f"CLM-{random.randint(1000, 9999)}", "amount": random.randint(1000, 8000)}
+        action = GovAction(agent_id="claims-bot", action_type=act_type, target=act_target, parameters=params)
+        ctx = GovCtx(agent_id="claims-bot", trust_profile=runtime.get_trust_profile("claims-bot"))
+        runtime.evaluate(action, ctx)
+        trust_traj.append(runtime.get_trust_profile("claims-bot").overall_trust)
+
+        bar_width = 40
+        filled = int((i + 1) / 100 * bar_width)
+        bar = chr(9608) * filled + chr(9617) * (bar_width - filled)
+        print(f"\r  Simulating 100 normal operations... [{bar}] {i + 1}/100", end="", flush=True)
+
+    print()
+    print()
+
+    # Show fingerprint
+    fp = runtime.get_fingerprint("claims-bot")
+    if fp is not None:
+        print(f"  {_bold('Behavioral Fingerprint:')}")
+        print(f"    Observations: {fp.total_observations}")
+        print(f"    Confidence:   {fp.confidence:.2f}")
+        print()
+
+        if fp.action_distribution:
+            print(f"    Action Distribution:")
+            for act, freq in sorted(fp.action_distribution.items(), key=lambda x: -x[1]):
+                bar = format_pct_bar(freq, 36)
+                print(f"      {act:8s} {bar}  {freq:.0%}")
+            print()
+
+        if fp.target_distribution:
+            print(f"    Target Distribution:")
+            for tgt, freq in sorted(fp.target_distribution.items(), key=lambda x: -x[1]):
+                bar = format_pct_bar(freq, 28)
+                print(f"      {tgt:20s} {bar}  {freq:.0%}")
+            print()
+
+    # Show trust trajectory
+    start_trust = trust_traj[0]
+    end_trust = trust_traj[-1]
+    print(f"  {_bold('Trust Trajectory:')}")
+    print(f"    Start: {start_trust:.3f} {chr(8594)} End: {end_trust:.3f}")
+    trend = "rising" if end_trust > start_trust + 0.02 else ("falling" if end_trust < start_trust - 0.02 else "stable")
+    print(f"    Trend: {trend}")
+    print()
+
+    # Mini trajectory chart
+    n_rows = 5
+    min_t = min(trust_traj)
+    max_t = max(trust_traj)
+    t_range = max_t - min_t if max_t > min_t else 0.1
+    chart_width = 40
+    step = max(1, len(trust_traj) // chart_width)
+    sampled = [trust_traj[i] for i in range(0, len(trust_traj), step)]
+
+    for row in range(n_rows, -1, -1):
+        level = min_t + (row / n_rows) * t_range
+        label = f"  {level:.2f} |"
+        chars = []
+        for val in sampled:
+            val_row = int((val - min_t) / t_range * n_rows) if t_range > 0 else n_rows // 2
+            chars.append("." if val_row == row else " ")
+        print(f"{label}{''.join(chars)}|")
+    print(f"         {chr(9492)}{chr(9472) * len(sampled)}{chr(9496)}")
+    print()
+
+    allowed_count = sum(1 for t1, t2 in zip(trust_traj, trust_traj[1:]) if t2 >= t1)
+    denied_count = 100 - allowed_count
+    print(f"  {_green(chr(10003))} 100 actions evaluated")
+    print(f"  {_green(chr(10003))} Fingerprint established")
+    print(f"  {_green(chr(10003))} Trust trajectory: {trend}")
+
+    _pause()
+
+    # ── Chapter 4b: Drift ───────────────────────────────────────────
+
+    _section("Introducing behavioral drift")
+
+    trust_before_drift = runtime.get_trust_profile("claims-bot").overall_trust
+    print(f"  Agent starts doing mostly deletes instead of reads...")
+    print(f"  Trust before drift: {_green(f'{trust_before_drift:.3f}')}")
+    print()
+
+    drift_traj: list[float] = [trust_before_drift]
+
+    for i in range(50):
+        # 80% deletes, 10% reads on sensitive targets, 10% normal reads
+        r = random.random()
+        if r < 0.80:
+            action = GovAction(agent_id="claims-bot", action_type="delete", target=random.choice(["claims_db", "customer_records", "policy_db"]))
+        elif r < 0.90:
+            action = GovAction(agent_id="claims-bot", action_type="read", target="payroll_db")
+        else:
+            action = GovAction(agent_id="claims-bot", action_type="read", target="claims_db")
+        ctx = GovCtx(agent_id="claims-bot", trust_profile=runtime.get_trust_profile("claims-bot"))
+        runtime.evaluate(action, ctx)
+        drift_traj.append(runtime.get_trust_profile("claims-bot").overall_trust)
+
+        bar_width = 40
+        filled = int((i + 1) / 50 * bar_width)
+        bar = chr(9608) * filled + chr(9617) * (bar_width - filled)
+        print(f"\r  Simulating drift... [{bar}] {i + 1}/50", end="", flush=True)
+
+    print()
+    print()
+
+    # Show drift
+    drift = runtime.get_drift("claims-bot")
+    if drift is not None:
+        sev = drift.severity
+        color = _red if sev in ("high", "critical") else (_yellow if sev == "moderate" else _green)
+        print(f"  {_bold('Drift Detection Report:')}")
+        print(f"    Drift Score:    {color(f'{drift.overall:.2f}')} ({sev.upper()})")
+        print(f"    JSD Divergence: {drift.action_drift:.2f}")
+        if drift.detail:
+            print(f"    Detail:         {drift.detail}")
+        print()
+
+    # Trust erosion
+    trust_after_drift = runtime.get_trust_profile("claims-bot").overall_trust
+    erosion = trust_after_drift - trust_before_drift
+    print(f"  {_bold('Trust Impact:')}")
+    print(f"    Trust eroded by drift: {trust_before_drift:.3f} {chr(8594)} {trust_after_drift:.3f}")
+    print(f"    Erosion amount: {_red(f'{erosion:+.3f}')}")
+    print()
+
+    alerts = runtime.get_drift_alerts("claims-bot")
+    if alerts:
+        for alert in alerts[-1:]:
+            sev_color = _red if alert.severity in ("critical", "high") else _yellow
+            print(f"  {sev_color(chr(9888))} DRIFT ALERT generated:")
+            print(f"    Severity: {alert.severity.upper()}")
+            if alert.drift_score.detail:
+                print(f"    Message:  \"{alert.drift_score.detail}\"")
+        print()
+
+    print(f"  {_dim('What you learned: The system learns normal patterns,')}")
+    print(f"  {_dim('then detects when behavior changes. Drift erodes trust')}")
+    print(f"  {_dim('and changes governance outcomes automatically.')}")
+
+    _pause()
+
+    # ── Chapter 5: Interruption ─────────────────────────────────────
+
+    _header("Chapter 5", 'Interruption \u2014 "Can we stop an agent mid-action?"')
+
+    print(f"  Agent claims-bot is processing a batch write...")
+    print()
+
+    rollback_log: list[str] = []
+
+    def _rollback() -> None:
+        for item in reversed(rollback_log):
+            print(f"    Reverting {item}... done")
+        rollback_log.clear()
+
+    batch_action = GovAction(agent_id="claims-bot", action_type="write", target="claims_db")
+    handle = runtime.begin_execution(batch_action, ctx1, rollback=_rollback)
+
+    for record_num in range(1, 11):
+        if handle.check_interrupt():
+            print(f"\n  {_red(chr(9940))} EXECUTION HALTED after record {record_num - 1}")
+            break
+
+        rollback_log.append(f"record {record_num}")
+        print(f"  {chr(9203)} Processing record {record_num} of 10... {_green(chr(10003))}")
+        _time.sleep(0.15)
+
+        if record_num == 3:
+            print()
+            print(f"  {_yellow(chr(9889))} INTERRUPT SIGNAL: Anomaly detected in write pattern")
+            print()
+            print(f"  Agent checks interrupt flag at next safe point...")
+            print()
+
+            runtime.interrupt_action(
+                batch_action.id,
+                reason="Anomaly detected in write pattern",
+                source="drift_monitor",
+            )
+
+    if handle.is_interrupted:
+        print()
+        print(f"  {_bold(chr(8617))} ROLLBACK executing...")
+
+        handle_rollback = handle.rollback
+        if handle_rollback:
+            handle_rollback()
+
+        print()
+        print(f"  {_green(chr(10003))} Rollback complete. System state restored.")
+    else:
+        runtime.complete_execution(batch_action.id, ctx1)
+        print(f"\n  All records processed successfully.")
+
+    print()
+    print(f"  {_dim('What you learned: Governance has teeth.')}")
+    print(f"  {_dim('The agent cooperated with the interrupt ' + emdash + ' it checked')}")
+    print(f"  {_dim('for interrupts at each safe point and rolled back cleanly.')}")
+
+    _pause()
+
+    # ── Chapter 6: Audit Trail ──────────────────────────────────────
+
+    _header("Chapter 6", 'Audit Trail \u2014 "What happened and why?"')
+
+    if runtime.audit_trail is not None:
+        _section("Recent audit records")
+
+        records = runtime.audit_trail.query(agent_id="claims-bot", limit=5)
+        if records:
+            for i, r in enumerate(records):
+                verdict_color = _green if r.verdict == "ALLOW" else (_red if r.verdict == "DENY" else _yellow)
+                ts_str = datetime.fromtimestamp(r.timestamp, tz=timezone.utc).strftime("%H:%M:%S")
+                print(f"  #{r.record_id}  {ts_str}  {verdict_color(f'GOVERNANCE.{r.verdict}')}")
+                print(f"       Action: {r.action_type} {chr(8594)} {r.action_target}")
+                print(f"       UCS: {r.ucs:.2f}  Tier: {r.tier}")
+                print(f"       Trust: {r.trust_score:.3f} ({r.trust_trend})")
+                if r.justification:
+                    just = r.justification[:100]
+                    if len(r.justification) > 100:
+                        just += "..."
+                    print(f"       Why: {just}")
+                print()
+
+        _section("Audit summary")
+
+        summary = runtime.audit_trail.summary()
+        total = summary.get("total_records", 0)
+        print(f"  Total evaluations:  {total}")
+        print()
+
+        by_verdict = summary.get("by_verdict", {})
+        if by_verdict:
+            print(f"  By verdict:")
+            for v, cnt in sorted(by_verdict.items()):
+                pct = cnt / total * 100 if total else 0
+                bar = format_pct_bar(cnt / total if total else 0, 40)
+                vcolor = _green if v == "ALLOW" else (_red if v == "DENY" else _yellow)
+                print(f"    {vcolor(f'{v:10s}')} {cnt:5d}  {bar}  {pct:.1f}%")
+            print()
+
+        by_severity = summary.get("by_severity", {})
+        if by_severity:
+            print(f"  By severity:")
+            for s, cnt in sorted(by_severity.items()):
+                pct = cnt / total * 100 if total else 0
+                bar = format_pct_bar(cnt / total if total else 0, 40)
+                print(f"    {s:10s} {cnt:5d}  {bar}  {pct:.1f}%")
+            print()
+
+        recent_alerts = summary.get("recent_alerts", [])
+        if recent_alerts:
+            print(f"  Recent alerts:")
+            for a in recent_alerts[-3:]:
+                sev = a.get("severity", "?")
+                code = a.get("context_code", "?")
+                sev_color = _red if sev in ("critical", "alert") else _yellow
+                print(f"    [{sev_color(sev.upper())}] {code}")
+            print()
+
+    print(f"  {_dim('What you learned: Every decision is recorded with full')}")
+    print(f"  {_dim('justification. The audit trail explains the why, not just the what.')}")
+
+    _pause()
+
+    # ── Chapter 7: Full picture ─────────────────────────────────────
+
+    _header("Chapter 7", 'The Full Picture')
+
+    final_trust = runtime.get_trust_profile("claims-bot").overall_trust
+    report = runtime.get_trust_report("claims-bot")
+
+    print(f"  {_bold('Governance Report for claims-bot')}")
+    print()
+    print(f"    Current Trust:     {final_trust:.3f}")
+    print(f"    Total Actions:     {report.get('successful_actions', 0) + report.get('violation_count', 0)}")
+    print(f"    Successful:        {report.get('successful_actions', 0)}")
+    print(f"    Violations:        {report.get('violation_count', 0)}")
+    print(f"    Violation Rate:    {report.get('violation_rate', 0):.1%}")
+    print()
+
+    fp_info = report.get("fingerprint")
+    if fp_info:
+        print(f"    Fingerprint:       {fp_info.get('total_observations', 0)} observations (confidence: {fp_info.get('confidence', 0):.2f})")
+
+    drift_info = report.get("drift")
+    if drift_info:
+        sev = drift_info.get("severity", "none")
+        color = _red if sev in ("high", "critical") else (_yellow if sev == "moderate" else _green)
+        drift_val = drift_info.get("overall", 0)
+        print(f"    Drift:             {color(f'{drift_val:.2f}')} ({sev})")
+
+    alert_count = report.get("active_alerts", 0)
+    if alert_count:
+        print(f"    Active Alerts:     {_red(str(alert_count))}")
+    print()
+
+    traj = report.get("trajectory", {})
+    sources = traj.get("sources", {})
+    if sources:
+        print(f"  {_bold('Trust by source:')}")
+        for src, info in sorted(sources.items()):
+            nd = info.get("net_delta", 0)
+            cnt = info.get("count", 0)
+            sign = "+" if nd >= 0 else ""
+            color = _green if nd > 0 else (_red if nd < 0 else _yellow)
+            print(f"    {src:25s} {color(f'{sign}{nd:.3f}')} ({cnt} events)")
+        print()
+
+    print(_bold(_cyan("=" * 60)))
+    print(_bold(_cyan("  Playground complete.")))
+    print(_bold(_cyan("=" * 60)))
+    print()
+    print(f"  You just saw the entire Nomotic governance lifecycle:")
+    print(f"    1. Identity     \u2014 Cryptographic birth certificate")
+    print(f"    2. Authority    \u2014 Scope, boundaries, and rules")
+    print(f"    3. Evaluation   \u2014 13-dimension scoring with UCS")
+    print(f"    4. Behavior     \u2014 Fingerprinting and drift detection")
+    print(f"    5. Interruption \u2014 Mechanical halt with rollback")
+    print(f"    6. Audit Trail  \u2014 Full accountability record")
+    print(f"    7. Trust        \u2014 Continuous calibration from all sources")
+    print()
+    print(f"  Next steps:")
+    print(f"    nomotic birth --agent-id my-agent --archetype customer-experience --org my-org")
+    print(f"    nomotic scope set my-agent --actions read,write --boundaries my_db")
+    print(f"    nomotic eval my-agent --action read --target my_db")
+    print(f"    nomotic simulate my-agent --scenario normal")
+    print()
+
+
+def _print_evaluation(
+    verdict: "GovernanceVerdict",
+    trust_before: float,
+    trust_after: float,
+    _c, _bold, _green, _red, _yellow, _cyan,
+) -> None:
+    """Print a formatted governance evaluation result."""
+    from nomotic.sandbox import format_bar
+    from nomotic.types import Verdict
+
+    for ds in verdict.dimension_scores:
+        bar = format_bar(ds.score, 20)
+        name_padded = f"{ds.dimension_name:26s}"
+        score_str = f"{ds.score:.2f}"
+
+        if ds.veto and ds.score < 0.5:
+            check = _red(f"{chr(10007)} VETO: {ds.reasoning}")
+            color_score = _red(score_str)
+        elif ds.score >= 0.7:
+            check = _green(ds.reasoning)
+            color_score = _green(score_str)
+        elif ds.score >= 0.4:
+            check = _yellow(ds.reasoning)
+            color_score = _yellow(score_str)
+        else:
+            check = _red(ds.reasoning)
+            color_score = _red(score_str)
+
+        print(f"  {name_padded} {color_score}  {bar}  {check}")
+
+    print()
+
+    ucs_str = f"{verdict.ucs:.3f}"
+    tier_labels = {1: "veto gate", 2: "threshold evaluation", 3: "deliberative review"}
+    tier_label = tier_labels.get(verdict.tier, "unknown")
+
+    if verdict.verdict == Verdict.ALLOW:
+        verdict_display = _green(f"{chr(9989)} ALLOW")
+    elif verdict.verdict == Verdict.DENY:
+        verdict_display = _red(f"{chr(10060)} DENY")
+    elif verdict.verdict == Verdict.ESCALATE:
+        verdict_display = _yellow(f"{chr(9888)} ESCALATE")
+    else:
+        verdict_display = _yellow(f"{chr(9888)} {verdict.verdict.name}")
+
+    print(f"  UCS:      {ucs_str}")
+    print(f"  Tier:     {verdict.tier} ({tier_label})")
+    print(f"  Verdict:  {verdict_display}")
+    if verdict.vetoed_by:
+        print(f"  Vetoed by: {', '.join(verdict.vetoed_by)}")
+    if verdict.reasoning:
+        print(f"  Reason:   {verdict.reasoning}")
+    print(f"  Time:     {verdict.evaluation_time_ms:.1f}ms")
+
+    # Trust update
+    delta = trust_after - trust_before
+    sign = "+" if delta >= 0 else ""
+    delta_color = _green if delta > 0 else (_red if delta < 0 else _yellow)
+    trend = "stable"
+    if delta > 0.001:
+        trend = f"{chr(8599)} rising"
+    elif delta < -0.001:
+        trend = f"{chr(8600)} falling"
+
+    print()
+    print(f"  Before:   {trust_before:.3f}")
+    print(f"  After:    {trust_after:.3f}  ({delta_color(f'{sign}{delta:.3f}')})")
+    print(f"  Trend:    {trend}")
+    print()
+
+
+def _cmd_audit_show(args: argparse.Namespace) -> None:
+    """Show audit records from an in-memory simulation or local eval sessions."""
+    # This is a convenience alias that displays a help message
+    # pointing users to the playground or eval commands.
+    print("The 'audit show' command works in two modes:")
+    print()
+    print("  1. After 'nomotic playground' — audit records are shown as part")
+    print("     of the interactive walkthrough (Chapter 6).")
+    print()
+    print("  2. Against a running API server:")
+    print("     nomotic audit query --agent-id <agent> --host 127.0.0.1 --port 8420")
+    print("     nomotic audit summary --agent-id <agent> --host 127.0.0.1 --port 8420")
+    print()
+    print("  Run 'nomotic playground' for the full interactive experience.")
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
     from nomotic.api import NomoticAPIServer
 
@@ -1267,6 +2539,47 @@ def build_parser() -> argparse.ArgumentParser:
     zone_val = zone_sub.add_parser("validate", help="Validate a zone path")
     zone_val.add_argument("path", help="Zone path to validate")
 
+    # ── scope ───────────────────────────────────────────────────────
+    scope = sub.add_parser("scope", help="Configure agent authority scope")
+    scope.add_argument("agent_id", help="Agent identifier")
+    scope_sub = scope.add_subparsers(dest="scope_command")
+    scope_set = scope_sub.add_parser("set", help="Set scope and boundaries")
+    scope_set.add_argument("--actions", default=None, help="Comma-separated allowed actions")
+    scope_set.add_argument("--boundaries", default=None, help="Comma-separated allowed targets")
+    scope_show = scope_sub.add_parser("show", help="Show current scope")
+
+    # ── rule ────────────────────────────────────────────────────────
+    rule = sub.add_parser("rule", help="Manage governance rules")
+    rule.add_argument("agent_id", help="Agent identifier")
+    rule_sub = rule.add_subparsers(dest="rule_command")
+    rule_add = rule_sub.add_parser("add", help="Add a governance rule")
+    rule_add.add_argument("--type", required=True, choices=["ethical", "human-override"], help="Rule type")
+    rule_add.add_argument("--condition", default=None, help="Condition expression (ethical rules)")
+    rule_add.add_argument("--action", default=None, help="Action type (human-override rules)")
+    rule_add.add_argument("--message", default=None, help="Message when rule triggers")
+    rule_add.add_argument("--name", default=None, help="Optional rule name")
+
+    # ── config show ─────────────────────────────────────────────────
+    config = sub.add_parser("config", help="Show governance configuration")
+    config.add_argument("agent_id", help="Agent identifier")
+
+    # ── eval ────────────────────────────────────────────────────────
+    eval_parser = sub.add_parser("eval", help="Evaluate a single action through the governance pipeline")
+    eval_parser.add_argument("agent_id", help="Agent identifier")
+    eval_parser.add_argument("--action", required=True, help="Action type to evaluate")
+    eval_parser.add_argument("--target", default=None, help="Target resource")
+    eval_parser.add_argument("--params", default=None, help="JSON parameters")
+
+    # ── simulate ────────────────────────────────────────────────────
+    sim_parser = sub.add_parser("simulate", help="Run a batch governance simulation")
+    sim_parser.add_argument("agent_id", help="Agent identifier")
+    sim_parser.add_argument("--scenario", required=True, help="Scenario name (normal, drift, violations, mixed)")
+    sim_parser.add_argument("--count", type=int, default=None, help="Override action count")
+    sim_parser.add_argument("--description", default=None, help="Custom scenario description")
+
+    # ── playground ──────────────────────────────────────────────────
+    sub.add_parser("playground", help="Run the full interactive governance playground")
+
     # ── serve ────────────────────────────────────────────────────────
     serve = sub.add_parser("serve", help="Start the Nomotic API server")
     serve.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
@@ -1359,6 +2672,12 @@ def main(argv: list[str] | None = None) -> None:
         "archetype": _cmd_archetype,
         "org": _cmd_org,
         "zone": _cmd_zone,
+        "scope": _cmd_scope,
+        "rule": _cmd_rule,
+        "config": _cmd_config,
+        "eval": _cmd_eval,
+        "simulate": _cmd_simulate,
+        "playground": _cmd_playground,
         "serve": _cmd_serve,
         "hello": _cmd_hello,
         "fingerprint": _cmd_fingerprint,
