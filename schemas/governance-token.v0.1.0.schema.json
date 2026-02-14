@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomotic.ai/schema/governance-token/v0.1.0",
+  "title": "Nomotic Governance Token Claims",
+  "description": "Defines the JWT claims carried by a Nomotic Governance Token. The token proves that an agent's reasoning was evaluated by a governance system and an action was approved.",
+  "type": "object",
+  "required": ["iss", "sub", "exp", "iat", "jti", "nomo_verdict", "nomo_artifact_hash", "nomo_method", "nomo_action_target", "nomo_flow", "nomo_scope"],
+
+  "properties": {
+    "iss": {
+      "type": "string",
+      "description": "JWT standard: Identifier of the governance evaluator that issued the token."
+    },
+    "sub": {
+      "type": "string",
+      "description": "JWT standard: The agent_id from the Reasoning Artifact."
+    },
+    "aud": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ],
+      "description": "JWT standard: The intended execution environment(s)."
+    },
+    "exp": {
+      "type": "integer",
+      "description": "JWT standard: Token expiration as Unix timestamp."
+    },
+    "iat": {
+      "type": "integer",
+      "description": "JWT standard: Token creation as Unix timestamp."
+    },
+    "jti": {
+      "type": "string",
+      "description": "JWT standard: Unique token identifier for tracking and revocation."
+    },
+
+    "nomo_verdict": {
+      "type": "string",
+      "description": "The governance verdict.",
+      "enum": ["PROCEED", "PROCEED_WITH_CONDITIONS"]
+    },
+    "nomo_artifact_hash": {
+      "type": "string",
+      "description": "SHA-256 hash of the Reasoning Artifact that was evaluated."
+    },
+    "nomo_method": {
+      "type": "string",
+      "description": "The approved method from the Nomotic method taxonomy.",
+      "enum": [
+        "query", "read", "write", "update", "delete", "archive", "restore", "export", "import",
+        "fetch", "search", "find", "scan", "filter", "extract", "pull",
+        "approve", "deny", "escalate", "recommend", "classify", "prioritize", "evaluate", "validate", "check", "rank", "predict",
+        "notify", "request", "respond", "reply", "broadcast", "subscribe", "publish", "send", "call",
+        "schedule", "assign", "delegate", "invoke", "retry", "cancel", "pause", "resume", "route", "run", "start", "open",
+        "transfer", "refund", "charge", "reserve", "release", "reconcile", "purchase",
+        "authenticate", "authorize", "revoke", "elevate", "sign", "register",
+        "configure", "deploy", "monitor", "report", "log", "audit", "sync",
+        "generate", "create", "summarize", "transform", "translate", "normalize", "merge", "link", "map", "make",
+        "set", "take", "show", "turn", "break", "submit"
+      ]
+    },
+    "nomo_action_target": {
+      "type": "string",
+      "description": "The approved action target."
+    },
+    "nomo_conditions": {
+      "type": "array",
+      "description": "Conditions that must be honored during execution.",
+      "items": {
+        "type": "object",
+        "required": ["type", "description"],
+        "properties": {
+          "type": { "type": "string" },
+          "description": { "type": "string" },
+          "parameters": { "type": "object" }
+        }
+      },
+      "default": []
+    },
+    "nomo_authority_envelope": {
+      "type": "string",
+      "description": "The authority envelope under which this action was approved."
+    },
+    "nomo_config_version": {
+      "type": "string",
+      "description": "Hash of the governance configuration at time of evaluation."
+    },
+    "nomo_ucs": {
+      "type": "number",
+      "description": "Unified Confidence Score at time of evaluation.",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "nomo_trust": {
+      "type": "number",
+      "description": "Agent trust level at time of evaluation.",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "nomo_flow": {
+      "type": "string",
+      "description": "Which protocol flow produced this token.",
+      "enum": ["full", "summary", "posthoc"]
+    },
+    "nomo_scope": {
+      "type": "string",
+      "description": "Action scope of the token.",
+      "enum": ["single", "class", "session"]
+    },
+    "nomo_scope_constraints": {
+      "type": "object",
+      "description": "For class and session scope tokens, the boundaries of what the token authorizes.",
+      "properties": {
+        "allowed_methods": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "allowed_targets": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "max_actions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_cost": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

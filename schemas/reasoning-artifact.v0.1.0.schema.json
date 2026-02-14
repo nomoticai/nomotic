@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomotic.ai/schema/reasoning-artifact/v0.1.0",
+  "title": "Nomotic Reasoning Artifact",
+  "description": "A structured representation of an AI agent's reasoning process, conforming to the Nomotic Protocol. This artifact externalizes the agent's deliberation in a format that governance systems can evaluate before action occurs.",
+  "type": "object",
+  "required": ["protocol_version", "artifact_id", "timestamp", "identity", "task", "reasoning", "decision", "uncertainty"],
+  "additionalProperties": false,
+
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "description": "Semantic version of the Nomotic Protocol schema this artifact conforms to.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "examples": ["0.1.0"]
+    },
+
+    "artifact_id": {
+      "type": "string",
+      "description": "Unique identifier for this reasoning artifact.",
+      "minLength": 1,
+      "examples": ["ra-20260213-a7b3c"]
+    },
+
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of artifact creation."
+    },
+
+    "identity": {
+      "type": "object",
+      "description": "Identifies who is reasoning. Links the artifact to a specific agent and its governance context.",
+      "required": ["agent_id"],
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Unique identifier for the agent producing this artifact.",
+          "minLength": 1
+        },
+        "certificate_id": {
+          "type": "string",
+          "description": "Reference to the agent's Nomotic birth certificate. Optional — only required if the organization uses Nomotic certificates."
+        },
+        "envelope_id": {
+          "type": "string",
+          "description": "Reference to the authority envelope the agent is operating under."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Identifier linking this artifact to a broader interaction session."
+        }
+      }
+    },
+
+    "task": {
+      "type": "object",
+      "description": "What the agent is trying to accomplish. Provides the goal-level context that frames the reasoning.",
+      "required": ["goal", "origin", "constraints_identified"],
+      "additionalProperties": false,
+      "properties": {
+        "goal": {
+          "type": "string",
+          "description": "Plain language description of the objective the agent is pursuing.",
+          "minLength": 1
+        },
+        "origin": {
+          "type": "string",
+          "description": "What initiated this task.",
+          "enum": ["user_request", "scheduled", "event_triggered", "agent_initiated", "escalation_received"]
+        },
+        "origin_id": {
+          "type": "string",
+          "description": "Identifier for the originating entity. For user_request, this should be a hashed identifier to protect privacy."
+        },
+        "constraints_identified": {
+          "type": "array",
+          "description": "Constraints the agent identified as relevant to this task. At least one constraint should be identified for non-trivial tasks.",
+          "items": {
+            "$ref": "#/$defs/Constraint"
+          }
+        }
+      }
+    },
+
+    "reasoning": {
+      "type": "object",
+      "description": "The agent's deliberation process. Structured as discrete factors that governance can individually evaluate.",
+      "required": ["factors", "alternatives_considered"],
+      "additionalProperties": false,
+      "properties": {
+        "factors": {
+          "type": "array",
+          "description": "Considerations the agent evaluated in arriving at its decision. Must contain at least one factor of type 'constraint'.",
+          "items": {
+            "$ref": "#/$defs/Factor"
+          },
+          "minItems": 1
+        },
+        "alternatives_considered": {
+          "type": "array",
+          "description": "Alternative actions the agent considered and why they were not chosen. An empty array is valid but signals limited deliberation.",
+          "items": {
+            "$ref": "#/$defs/Alternative"
+          }
+        },
+        "narrative": {
+          "type": "string",
+          "description": "Optional human-readable summary of the reasoning. Not evaluated by governance — present for audit readability."
+        }
+      }
+    },
+
+    "decision": {
+      "type": "object",
+      "description": "What the agent intends to do and how the decision connects to the reasoning.",
+      "required": ["intended_action", "justifications", "authority_claim"],
+      "additionalProperties": false,
+      "properties": {
+        "intended_action": {
+          "$ref": "#/$defs/IntendedAction"
+        },
+        "justifications": {
+          "type": "array",
+          "description": "Links between the decision and specific reasoning factors. Each justification must reference a valid factor_id.",
+          "items": {
+            "$ref": "#/$defs/Justification"
+          },
+          "minItems": 1
+        },
+        "authority_claim": {
+          "$ref": "#/$defs/AuthorityClaim"
+        }
+      }
+    },
+
+    "uncertainty": {
+      "type": "object",
+      "description": "What the agent doesn't know. Declaring uncertainty is a sign of reasoning quality, not weakness.",
+      "required": ["unknowns", "assumptions", "overall_confidence"],
+      "additionalProperties": false,
+      "properties": {
+        "unknowns": {
+          "type": "array",
+          "description": "Information the agent identified as relevant but unavailable.",
+          "items": {
+            "$ref": "#/$defs/Unknown"
+          }
+        },
+        "assumptions": {
+          "type": "array",
+          "description": "Assumptions the agent is making to proceed despite incomplete information.",
+          "items": {
+            "$ref": "#/$defs/Assumption"
+          }
+        },
+        "overall_confidence": {
+          "type": "number",
+          "description": "The agent's holistic confidence in its decision (0.0-1.0). Should be consistent with stated uncertainties.",
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      }
+    },
+
+    "plan": {
+      "type": "object",
+      "description": "Optional. For multi-step workflows, provides context about where this reasoning fits in a larger plan.",
+      "required": ["workflow_id", "total_steps", "current_step", "step_description"],
+      "additionalProperties": false,
+      "properties": {
+        "workflow_id": {
+          "type": "string",
+          "description": "Identifier for the overall workflow this step belongs to."
+        },
+        "total_steps": {
+          "type": "integer",
+          "description": "Total number of steps in the plan.",
+          "minimum": 1
+        },
+        "current_step": {
+          "type": "integer",
+          "description": "Which step this artifact represents (1-indexed).",
+          "minimum": 1
+        },
+        "step_description": {
+          "type": "string",
+          "description": "What this specific step accomplishes within the broader workflow."
+        },
+        "dependencies": {
+          "type": "array",
+          "description": "Artifact IDs of previous steps this step depends on.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remaining_steps": {
+          "type": "array",
+          "description": "Brief descriptions of subsequent steps. Enables cascading impact assessment.",
+          "items": {
+            "type": "object",
+            "required": ["step_number", "description"],
+            "properties": {
+              "step_number": { "type": "integer" },
+              "description": { "type": "string" }
+            }
+          }
+        },
+        "rollback_capability": {
+          "type": "boolean",
+          "description": "Whether this step can be undone if a subsequent step fails.",
+          "default": false
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "Constraint": {
+      "type": "object",
+      "description": "A constraint the agent identified as relevant to the task.",
+      "required": ["type", "description", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Category of constraint.",
+          "enum": ["policy", "regulatory", "authority", "ethical", "resource", "temporal", "technical", "organizational"]
+        },
+        "description": {
+          "type": "string",
+          "description": "What the constraint is."
+        },
+        "source": {
+          "type": "string",
+          "description": "Where the agent learned about this constraint. Use URI format where possible (policy://..., regulation://..., etc.)."
+        }
+      }
+    },
+
+    "Factor": {
+      "type": "object",
+      "description": "A consideration the agent evaluated during reasoning.",
+      "required": ["id", "type", "description", "source", "assessment", "influence", "confidence"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier within this artifact for cross-referencing in justifications.",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "description": "Category of factor.",
+          "enum": ["constraint", "context", "precedent", "evidence", "inference", "uncertainty", "alternative", "risk"]
+        },
+        "description": {
+          "type": "string",
+          "description": "What the factor is."
+        },
+        "source": {
+          "type": "string",
+          "description": "Where this information came from. Use descriptive values: data reference, policy reference, user_input, inference, prior_experience."
+        },
+        "assessment": {
+          "type": "string",
+          "description": "What the agent concluded about this factor."
+        },
+        "influence": {
+          "type": "string",
+          "description": "How much this factor influenced the decision.",
+          "enum": ["decisive", "significant", "moderate", "minor", "noted"]
+        },
+        "confidence": {
+          "type": "number",
+          "description": "Agent's confidence in this factor's accuracy (0.0-1.0).",
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      }
+    },
+
+    "Alternative": {
+      "type": "object",
+      "description": "An alternative action the agent considered and rejected.",
+      "required": ["method", "reason_rejected"],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "context": {
+          "type": "string",
+          "description": "Description of how this method would be applied in this alternative."
+        },
+        "reason_rejected": {
+          "type": "string",
+          "description": "Why this alternative was not chosen."
+        }
+      }
+    },
+
+    "Method": {
+      "type": "string",
+      "description": "A standardized action method from the Nomotic method taxonomy.",
+      "enum": [
+        "query", "read", "write", "update", "delete", "archive", "restore", "export", "import",
+        "fetch", "search", "find", "scan", "filter", "extract", "pull",
+        "approve", "deny", "escalate", "recommend", "classify", "prioritize", "evaluate", "validate", "check", "rank", "predict",
+        "notify", "request", "respond", "reply", "broadcast", "subscribe", "publish", "send", "call",
+        "schedule", "assign", "delegate", "invoke", "retry", "cancel", "pause", "resume", "route", "run", "start", "open",
+        "transfer", "refund", "charge", "reserve", "release", "reconcile", "purchase",
+        "authenticate", "authorize", "revoke", "elevate", "sign", "register",
+        "configure", "deploy", "monitor", "report", "log", "audit", "sync",
+        "generate", "create", "summarize", "transform", "translate", "normalize", "merge", "link", "map", "make",
+        "set", "take", "show", "turn", "break", "submit"
+      ]
+    },
+
+    "MethodCategory": {
+      "type": "string",
+      "description": "Category grouping for methods.",
+      "enum": [
+        "data", "retrieval", "decision", "communication", "orchestration",
+        "transaction", "security", "system", "generation", "control"
+      ]
+    },
+
+    "IntendedAction": {
+      "type": "object",
+      "description": "The action the agent will take if governance approves.",
+      "required": ["method", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "target": {
+          "type": "string",
+          "description": "The target of the action.",
+          "minLength": 1
+        },
+        "context": {
+          "type": "string",
+          "description": "Additional context about the action."
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Additional action parameters.",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "Justification": {
+      "type": "object",
+      "description": "Links a decision to a specific reasoning factor.",
+      "required": ["factor_id", "explanation"],
+      "additionalProperties": false,
+      "properties": {
+        "factor_id": {
+          "type": "string",
+          "description": "References a factor.id from the reasoning section."
+        },
+        "explanation": {
+          "type": "string",
+          "description": "How this factor supports the intended action."
+        }
+      }
+    },
+
+    "AuthorityClaim": {
+      "type": "object",
+      "description": "The agent's claim of what authority it believes it is operating under.",
+      "required": ["envelope_type"],
+      "additionalProperties": false,
+      "properties": {
+        "envelope_type": {
+          "type": "string",
+          "description": "What kind of authority the agent claims.",
+          "enum": ["standard", "conditional", "delegated", "escalated", "pre_authorized"]
+        },
+        "conditions_met": {
+          "type": "array",
+          "description": "For conditional authority, the conditions the agent believes are satisfied.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit_reference": {
+          "type": "string",
+          "description": "The specific limit or threshold relevant to this decision."
+        }
+      }
+    },
+
+    "Unknown": {
+      "type": "object",
+      "description": "Information the agent identified as relevant but unavailable.",
+      "required": ["description", "impact"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "What information is missing."
+        },
+        "impact": {
+          "type": "string",
+          "description": "How the missing information might affect the decision."
+        }
+      }
+    },
+
+    "Assumption": {
+      "type": "object",
+      "description": "An assumption the agent is making to proceed despite incomplete information.",
+      "required": ["description", "basis", "risk_if_wrong"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "What is being assumed."
+        },
+        "basis": {
+          "type": "string",
+          "description": "Why the agent considers this assumption reasonable."
+        },
+        "risk_if_wrong": {
+          "type": "string",
+          "description": "What happens if the assumption is incorrect."
+        }
+      }
+    }
+  }
+}
