@@ -137,7 +137,7 @@ class AgentCertificate:
         return cls(
             certificate_id=d["certificate_id"],
             agent_id=d["agent_id"],
-            owner=d["owner"],
+            owner=d.get("owner", ""),
             archetype=d["archetype"],
             organization=d["organization"],
             zone_path=d["zone_path"],
