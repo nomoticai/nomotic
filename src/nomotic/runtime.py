@@ -72,6 +72,14 @@ class RuntimeConfig:
     modifier_config: Any = None  # ModifierConfig from contextual_modifier
     enable_workflow_governor: bool = True
     workflow_governor_config: Any = None  # WorkflowGovernorConfig from workflow_governor
+    # Phase 8: Ethical Governance Infrastructure
+    enable_equity_analysis: bool = True
+    equity_config: Any = None  # EquityConfig — org must configure for equity analysis
+    enable_bias_detection: bool = True
+    enable_ethical_reasoning: bool = True
+    ethical_reasoning_config: Any = None  # EthicalReasoningConfig
+    enable_cross_dimensional: bool = True
+    anonymization_policy: Any = None  # AnonymizationPolicy
 
 
 class GovernanceRuntime:
@@ -189,6 +197,27 @@ class GovernanceRuntime:
         else:
             self.workflow_governor = None
 
+        # Phase 8: Ethical Governance Infrastructure
+        if self.config.enable_equity_analysis and self.config.equity_config is not None:
+            from nomotic.equity import EquityAnalyzer
+            self.equity_analyzer: Any = EquityAnalyzer(self.config.equity_config)
+        else:
+            self.equity_analyzer = None
+
+        if self.config.enable_bias_detection and self.config.equity_config is not None:
+            from nomotic.bias import BiasDetector
+            self.bias_detector: Any = BiasDetector(self.config.equity_config)
+        else:
+            self.bias_detector = None
+
+        if self.config.enable_cross_dimensional:
+            from nomotic.cross_dimensional import CrossDimensionalDetector
+            self.cross_dimensional_detector: Any = CrossDimensionalDetector()
+        else:
+            self.cross_dimensional_detector = None
+
+        self.anonymization_policy: Any = self.config.anonymization_policy
+
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
         self._cert_map: dict[str, str] = {}  # agent_id -> certificate_id
@@ -259,6 +288,15 @@ class GovernanceRuntime:
             # Step 2: Evaluate all 13 dimensions simultaneously
             scores = self.registry.evaluate_all(action, context)
 
+            # Step 2b: Cross-dimensional signal detection (Phase 8)
+            cross_dim_signals: list[Any] = []
+            if self.cross_dimensional_detector is not None:
+                cross_dim_signals = self.cross_dimensional_detector.detect_signals(
+                    scores,
+                    trust_state=context.trust_profile.overall_trust,
+                    action=action,
+                )
+
             # Step 3: Tier 1 — deterministic gate
             tier1_result = self.tier_one.evaluate(action, context, scores)
             if tier1_result.decided:
@@ -266,11 +304,21 @@ class GovernanceRuntime:
                 assert verdict is not None
                 verdict.evaluation_time_ms = (time.time() - start) * 1000
                 verdict.context_modification = context_modification
+                verdict.cross_dimensional_signals = cross_dim_signals
                 self._record_verdict(action, context, verdict)
                 return verdict
 
             # Step 4: Compute UCS for Tier 2
             ucs = self.ucs_engine.compute(scores, context.trust_profile)
+
+            # Step 4b: Cross-dimensional signals influence ambiguous decisions
+            if cross_dim_signals:
+                critical_signals = [
+                    s for s in cross_dim_signals if s.severity == "critical"
+                ]
+                if critical_signals and self.config.deny_threshold < ucs < self.config.allow_threshold:
+                    # Push ambiguous UCS toward ESCALATE
+                    ucs = max(ucs - 0.1, 0.0)
 
             # Step 5: Tier 2 — weighted evaluation
             tier2_result = self.tier_two.evaluate(action, context, scores, ucs)
@@ -279,6 +327,7 @@ class GovernanceRuntime:
                 assert verdict is not None
                 verdict.evaluation_time_ms = (time.time() - start) * 1000
                 verdict.context_modification = context_modification
+                verdict.cross_dimensional_signals = cross_dim_signals
                 self._record_verdict(action, context, verdict)
                 return verdict
 
@@ -288,6 +337,7 @@ class GovernanceRuntime:
             assert verdict is not None
             verdict.evaluation_time_ms = (time.time() - start) * 1000
             verdict.context_modification = context_modification
+            verdict.cross_dimensional_signals = cross_dim_signals
             self._record_verdict(action, context, verdict)
             return verdict
         finally:
@@ -980,6 +1030,68 @@ class GovernanceRuntime:
             dim = self.registry.get(dim_name)
             if dim is not None:
                 dim.weight = original_weight
+
+    # ── Phase 8: Ethical Governance convenience methods ──────────────
+
+    def run_equity_analysis(
+        self,
+        agent_id: str | None = None,
+        method: str | None = None,
+        window_hours: int | None = None,
+    ) -> Any:
+        """Run equity analysis on the audit trail.
+
+        Requires equity_config in RuntimeConfig and audit enabled.
+        """
+        if self.equity_analyzer is None:
+            raise ValueError(
+                "Equity analysis requires equity_config in RuntimeConfig"
+            )
+        if self._audit_trail is None:
+            raise ValueError("Equity analysis requires audit trail enabled")
+        return self.equity_analyzer.analyze(
+            self._audit_trail,
+            agent_id=agent_id,
+            method=method,
+            window_hours=window_hours,
+        )
+
+    def run_bias_assessment(self) -> Any:
+        """Run governance bias assessment on the current configuration."""
+        if self.bias_detector is None:
+            raise ValueError(
+                "Bias detection requires equity_config in RuntimeConfig"
+            )
+        return self.bias_detector.assess_configuration(self)
+
+    def get_cross_dimensional_signals(
+        self,
+        agent_id: str | None = None,
+        window_hours: int = 168,
+    ) -> Any:
+        """Get aggregate cross-dimensional signals from the audit trail."""
+        if self.cross_dimensional_detector is None:
+            raise ValueError("Cross-dimensional detection is not enabled")
+        if self._audit_trail is None:
+            raise ValueError("Cross-dimensional analysis requires audit trail enabled")
+        return self.cross_dimensional_detector.analyze_aggregate(
+            self._audit_trail,
+            agent_id=agent_id,
+            window_hours=window_hours,
+        )
+
+    def anonymize_parameters(
+        self,
+        parameters: dict[str, Any],
+        method: str,
+    ) -> dict[str, Any]:
+        """Apply anonymization policy to action parameters.
+
+        Returns a copy with hidden attributes removed.  Original unchanged.
+        """
+        if self.anonymization_policy is None:
+            return dict(parameters)
+        return self.anonymization_policy.apply_to_parameters(parameters, method)
 
     def _append_history(self, agent_id: str, record: ActionRecord) -> None:
         history = self._action_history.setdefault(agent_id, [])

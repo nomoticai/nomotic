@@ -169,6 +169,7 @@ class GovernanceVerdict:
     timestamp: float = field(default_factory=time.time)
     evaluation_time_ms: float = 0.0
     context_modification: Any = None  # ContextModification from Phase 7B, if present
+    cross_dimensional_signals: list[Any] = field(default_factory=list)  # Phase 8 signals
 
 
 @dataclass
