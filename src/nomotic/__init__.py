@@ -77,6 +77,19 @@ from nomotic.contextual_modifier import (
     ModifierConfig,
     WeightAdjustment,
 )
+from nomotic.workflow_governor import (
+    CompoundAuthorityFlag,
+    ConsequenceProjector,
+    DependencyGraph,
+    DriftAcrossSteps,
+    OrderingConcern,
+    ProjectedRisk,
+    StepAssessment,
+    WorkflowGovernor,
+    WorkflowGovernorConfig,
+    WorkflowRiskAssessment,
+    WorkflowRiskFactor,
+)
 from nomotic.context_profile import (
     CompletedStep,
     CompoundMethod,
@@ -203,6 +216,18 @@ __all__ = [
     "ContextualModifier",
     "ModifierConfig",
     "WeightAdjustment",
+    # Workflow Governor (Phase 7C)
+    "CompoundAuthorityFlag",
+    "ConsequenceProjector",
+    "DependencyGraph",
+    "DriftAcrossSteps",
+    "OrderingConcern",
+    "ProjectedRisk",
+    "StepAssessment",
+    "WorkflowGovernor",
+    "WorkflowGovernorConfig",
+    "WorkflowRiskAssessment",
+    "WorkflowRiskFactor",
     # Context Profiles (Phase 7A)
     "CompletedStep",
     "CompoundMethod",

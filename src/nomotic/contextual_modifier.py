@@ -225,6 +225,20 @@ class ContextualModifier:
         trust_mod = 0.0
         reasoning_parts: list[str] = []
 
+        # Consume workflow governor StepAssessment if present (Phase 7C)
+        step_assessment = getattr(profile, '_step_assessment', None)
+        if step_assessment is not None:
+            adj, con, sig = self._consume_step_assessment(step_assessment)
+            all_adjustments.extend(adj)
+            all_constraints.extend(con)
+            all_signals.extend(sig)
+            if adj or con or sig:
+                reasoning_parts.append(
+                    f"Workflow Governor: {len(adj)} weight adjustments, "
+                    f"{len(con)} constraints, {len(sig)} risk signals "
+                    f"(scrutiny={step_assessment.recommended_additional_scrutiny:.2f})"
+                )
+
         # Run each context-type analyzer if enabled and context is present
         if self.config.enable_workflow_modifiers and profile.workflow is not None:
             adj, con, sig = self._analyze_workflow(action, context, profile.workflow)
@@ -959,6 +973,61 @@ class ContextualModifier:
             trust_mod += 0.02
 
         return adjustments, constraints, signals, trust_mod
+
+    # ── Workflow Governor integration (Phase 7C) ─────────────────────────
+
+    def _consume_step_assessment(
+        self,
+        step_assessment: Any,
+    ) -> tuple[list[WeightAdjustment], list[ContextConstraint], list[ContextRiskSignal]]:
+        """Consume a StepAssessment from the Workflow Governor to produce
+        additional governance modifications."""
+        adjustments: list[WeightAdjustment] = []
+        constraints: list[ContextConstraint] = []
+        signals: list[ContextRiskSignal] = []
+
+        scrutiny = step_assessment.recommended_additional_scrutiny
+
+        # High scrutiny → proportional weight increases across key dimensions
+        if scrutiny > 0.5:
+            factor = scrutiny - 0.5  # 0.0 to 0.5 range
+            for dim_name in ("cascading_impact", "scope_compliance", "authority_verification"):
+                adjustments.append(WeightAdjustment(
+                    dimension_name=dim_name,
+                    original_weight=1.3,
+                    adjusted_weight=min(1.3 + factor * 0.4, 3.0),
+                    reason=f"Workflow Governor: elevated scrutiny ({scrutiny:.2f}) at step {step_assessment.step_number}",
+                ))
+
+        # Ordering concerns → constraints
+        for concern in step_assessment.ordering_concerns:
+            constraints.append(ContextConstraint(
+                constraint_type="elevated_audit",
+                description=f"Workflow ordering concern: {concern.description}",
+                source_context="workflow_governor",
+                severity="recommended" if concern.severity in ("medium", "low") else "required",
+            ))
+
+        # Compound authority flags → critical risk signals
+        for flag in step_assessment.compound_flags:
+            signals.append(ContextRiskSignal(
+                signal_type="compound_authority",
+                description=f"Workflow Governor: {flag.description}",
+                source_context="workflow_governor",
+                severity=flag.severity,
+                affected_dimensions=["scope_compliance", "authority_verification", "isolation_integrity"],
+            ))
+
+        # High commitment depth → increase cascading_impact weight
+        if step_assessment.commitment_depth > 5:
+            adjustments.append(WeightAdjustment(
+                dimension_name="cascading_impact",
+                original_weight=1.3,
+                adjusted_weight=min(1.3 + 0.3, 3.0),
+                reason=f"Workflow Governor: high commitment depth ({step_assessment.commitment_depth})",
+            ))
+
+        return adjustments, constraints, signals
 
     # ── Thin context handler ────────────────────────────────────────────
 
