@@ -80,7 +80,7 @@ _OWNER_ACTIVITY_RE = re.compile(r"^/v1/owner/([^/]+)/activity$")
 _OWNER_ENGAGEMENT_RE = re.compile(r"^/v1/owner/([^/]+)/engagement$")
 _USER_STATS_RE = re.compile(r"^/v1/user/([^/]+)/stats$")
 _CONTEXT_PROFILE_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)$")
-_CONTEXT_PROFILE_ACTION_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/(summary|risks|feedback|signal)$")
+_CONTEXT_PROFILE_ACTION_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/(summary|risks|feedback|signal|modifications)$")
 _CONTEXT_PROFILE_STEP_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/workflow/step$")
 
 
@@ -320,6 +320,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._handle_context_feedback(ctx, profile_id)
             if action == "signal" and method == "POST":
                 return self._handle_context_signal(ctx, profile_id)
+            if action == "modifications" and method == "GET":
+                return self._handle_context_modifications(ctx, profile_id)
 
         m = _CONTEXT_PROFILE_RE.match(path)
         if m:
@@ -1143,6 +1145,38 @@ class _Handler(BaseHTTPRequestHandler):
 
         profile.add_external_signal(signal)
         return 200, _json_bytes({"added": True, "signal_count": len(profile.external.external_signals)})
+
+    def _handle_context_modifications(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """GET /v1/context/{profile_id}/modifications — Preview contextual modifications.
+
+        Takes optional query params: method, target to construct a hypothetical action.
+        """
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context modifications require a GovernanceRuntime")
+        if ctx.runtime.contextual_modifier is None:
+            return _error(404, "not_found", "Contextual modifier is not enabled")
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+
+        params = self._query_params()
+        action_method = params.get("method", "unknown")
+        action_target = params.get("target", "unknown")
+
+        from nomotic.types import Action, AgentContext, TrustProfile
+        action = Action(
+            agent_id=profile.agent_id,
+            action_type=action_method,
+            target=action_target,
+        )
+        trust_profile = ctx.runtime.get_trust_profile(profile.agent_id)
+        agent_context = AgentContext(
+            agent_id=profile.agent_id,
+            trust_profile=trust_profile,
+            context_profile_id=profile_id,
+        )
+        modification = ctx.runtime.contextual_modifier.modify(action, agent_context, profile)
+        return 200, _json_bytes(modification.to_dict())
 
     def _handle_close_context_profile(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
         """DELETE /v1/context/{profile_id} — Close/archive a profile."""

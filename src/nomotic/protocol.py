@@ -531,6 +531,7 @@ class Assessment:
     dimensional_summary: dict[str, float] = field(default_factory=dict)
     ucs: float | None = None
     trust_state: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -562,6 +563,8 @@ class Assessment:
             d["ucs"] = self.ucs
         if self.trust_state is not None:
             d["trust_state"] = self.trust_state
+        if self.metadata:
+            d["metadata"] = self.metadata
         return d
 
     @classmethod
@@ -588,6 +591,7 @@ class Assessment:
             dimensional_summary=data.get("dimensional_summary", {}),
             ucs=data.get("ucs"),
             trust_state=data.get("trust_state"),
+            metadata=data.get("metadata", {}),
         )
 
 

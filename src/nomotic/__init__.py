@@ -69,6 +69,14 @@ from nomotic.protocol import (
 )
 from nomotic.token import GovernanceToken, TokenClaims, TokenValidationResult, TokenValidator
 from nomotic.evaluator import EvaluatorConfig, PostHocAssessment, ProtocolEvaluator
+from nomotic.contextual_modifier import (
+    ContextConstraint,
+    ContextModification,
+    ContextRiskSignal,
+    ContextualModifier,
+    ModifierConfig,
+    WeightAdjustment,
+)
 from nomotic.context_profile import (
     CompletedStep,
     CompoundMethod,
@@ -188,6 +196,13 @@ __all__ = [
     "EvaluatorConfig",
     "PostHocAssessment",
     "ProtocolEvaluator",
+    # Contextual Modifier (Phase 7B)
+    "ContextConstraint",
+    "ContextModification",
+    "ContextRiskSignal",
+    "ContextualModifier",
+    "ModifierConfig",
+    "WeightAdjustment",
     # Context Profiles (Phase 7A)
     "CompletedStep",
     "CompoundMethod",
