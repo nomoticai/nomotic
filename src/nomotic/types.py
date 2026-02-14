@@ -110,6 +110,7 @@ class AgentContext:
     active_constraints: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     user_context: UserContext | None = None
+    context_profile_id: str | None = None  # reference to active ContextProfile
 
 
 @dataclass

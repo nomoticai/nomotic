@@ -79,6 +79,9 @@ _PROVENANCE_HISTORY_RE = re.compile(r"^/v1/provenance/history/([^/]+)/(.+)$")
 _OWNER_ACTIVITY_RE = re.compile(r"^/v1/owner/([^/]+)/activity$")
 _OWNER_ENGAGEMENT_RE = re.compile(r"^/v1/owner/([^/]+)/engagement$")
 _USER_STATS_RE = re.compile(r"^/v1/user/([^/]+)/stats$")
+_CONTEXT_PROFILE_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)$")
+_CONTEXT_PROFILE_ACTION_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/(summary|risks|feedback|signal)$")
+_CONTEXT_PROFILE_STEP_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/workflow/step$")
 
 
 # ── Request handler ─────────────────────────────────────────────────────
@@ -103,6 +106,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         self._dispatch("PATCH")
+
+    def do_DELETE(self) -> None:
+        self._dispatch("DELETE")
 
     def _dispatch(self, method: str) -> None:
         try:
@@ -291,6 +297,39 @@ class _Handler(BaseHTTPRequestHandler):
             return self._handle_schema(ctx)
         if path == "/v1/schema/version" and method == "GET":
             return self._handle_schema_version(ctx)
+
+        # ── Context Profiles (Phase 7A) ──────────────────────────────
+        if path == "/v1/context":
+            if method == "GET":
+                return self._handle_list_context_profiles(ctx)
+            if method == "POST":
+                return self._handle_create_context_profile(ctx)
+
+        m = _CONTEXT_PROFILE_STEP_RE.match(path)
+        if m and method == "POST":
+            return self._handle_context_workflow_step(ctx, m.group(1))
+
+        m = _CONTEXT_PROFILE_ACTION_RE.match(path)
+        if m:
+            profile_id, action = m.group(1), m.group(2)
+            if action == "summary" and method == "GET":
+                return self._handle_context_summary(ctx, profile_id)
+            if action == "risks" and method == "GET":
+                return self._handle_context_risks(ctx, profile_id)
+            if action == "feedback" and method == "POST":
+                return self._handle_context_feedback(ctx, profile_id)
+            if action == "signal" and method == "POST":
+                return self._handle_context_signal(ctx, profile_id)
+
+        m = _CONTEXT_PROFILE_RE.match(path)
+        if m:
+            profile_id = m.group(1)
+            if method == "GET":
+                return self._handle_get_context_profile(ctx, profile_id)
+            if method == "PATCH":
+                return self._handle_update_context_profile(ctx, profile_id)
+            if method == "DELETE":
+                return self._handle_close_context_profile(ctx, profile_id)
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -933,6 +972,205 @@ class _Handler(BaseHTTPRequestHandler):
             return _error(404, "not_found", "Protocol evaluator not configured")
         versions = ctx.evaluator.get_supported_versions()
         return 200, _json_bytes({"supported_versions": versions})
+
+    # ── Context Profiles (Phase 7A) ──────────────────────────────────
+
+    def _handle_create_context_profile(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/context — Create a new context profile."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        data = self._read_json()
+        agent_id = data.get("agent_id")
+        profile_type = data.get("profile_type", "workflow")
+        if not agent_id:
+            return _error(400, "validation_error", "Missing 'agent_id' field")
+
+        from nomotic.context_profile import (
+            WorkflowContext, SituationalContext, RelationalContext,
+            TemporalContext, HistoricalContext, InputContext,
+            OutputContext, ExternalContext, MetaContext, FeedbackContext,
+        )
+
+        kwargs: dict[str, Any] = {}
+        _SECTION_MAP = {
+            "workflow": WorkflowContext,
+            "situational": SituationalContext,
+            "relational": RelationalContext,
+            "temporal": TemporalContext,
+            "historical": HistoricalContext,
+            "input_context": InputContext,
+            "output": OutputContext,
+            "external": ExternalContext,
+            "meta": MetaContext,
+            "feedback": FeedbackContext,
+        }
+        for key, cls in _SECTION_MAP.items():
+            if key in data:
+                try:
+                    kwargs[key] = cls.from_dict(data[key])
+                except (KeyError, TypeError, ValueError) as exc:
+                    return _error(400, "validation_error", f"Invalid {key}: {exc}")
+
+        profile = ctx.runtime.context_profiles.create_profile(
+            agent_id=agent_id,
+            profile_type=profile_type,
+            **kwargs,
+        )
+        return 201, _json_bytes(profile.to_dict())
+
+    def _handle_get_context_profile(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """GET /v1/context/{profile_id} — Retrieve a context profile."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+        return 200, _json_bytes(profile.to_dict())
+
+    def _handle_update_context_profile(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """PATCH /v1/context/{profile_id} — Update specific context sections."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+
+        data = self._read_json()
+
+        from nomotic.context_profile import (
+            WorkflowContext, SituationalContext, RelationalContext,
+            TemporalContext, HistoricalContext, InputContext,
+            OutputContext, ExternalContext, MetaContext, FeedbackContext,
+        )
+
+        kwargs: dict[str, Any] = {}
+        _SECTION_MAP = {
+            "workflow": WorkflowContext,
+            "situational": SituationalContext,
+            "relational": RelationalContext,
+            "temporal": TemporalContext,
+            "historical": HistoricalContext,
+            "input_context": InputContext,
+            "output": OutputContext,
+            "external": ExternalContext,
+            "meta": MetaContext,
+            "feedback": FeedbackContext,
+        }
+        for key, cls in _SECTION_MAP.items():
+            if key in data:
+                try:
+                    kwargs[key] = cls.from_dict(data[key])
+                except (KeyError, TypeError, ValueError) as exc:
+                    return _error(400, "validation_error", f"Invalid {key}: {exc}")
+
+        updated = ctx.runtime.context_profiles.update_profile(profile_id, **kwargs)
+        if updated is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+        return 200, _json_bytes(updated.to_dict())
+
+    def _handle_context_summary(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """GET /v1/context/{profile_id}/summary — Compact summary."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+        return 200, _json_bytes(profile.summary())
+
+    def _handle_context_risks(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """GET /v1/context/{profile_id}/risks — Risk signals."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+        signals = profile.risk_signals()
+        return 200, _json_bytes({"profile_id": profile_id, "risk_signals": signals, "count": len(signals)})
+
+    def _handle_context_workflow_step(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """POST /v1/context/{profile_id}/workflow/step — Record a completed workflow step."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+        if profile.workflow is None:
+            return _error(400, "validation_error", "Profile has no workflow context")
+
+        data = self._read_json()
+        from nomotic.context_profile import CompletedStep
+        try:
+            step = CompletedStep.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid step: {exc}")
+
+        profile.update_workflow_step(step)
+        return 200, _json_bytes(profile.workflow.to_dict())
+
+    def _handle_context_feedback(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """POST /v1/context/{profile_id}/feedback — Add feedback."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+
+        data = self._read_json()
+        from nomotic.context_profile import FeedbackRecord
+        try:
+            feedback = FeedbackRecord.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid feedback: {exc}")
+
+        profile.add_feedback(feedback)
+        return 200, _json_bytes({"added": True, "feedback_count": len(profile.feedback.feedback_received)})
+
+    def _handle_context_signal(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """POST /v1/context/{profile_id}/signal — Add external signal."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        profile = ctx.runtime.context_profiles.get_profile(profile_id)
+        if profile is None:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+
+        data = self._read_json()
+        from nomotic.context_profile import ExternalSignal
+        try:
+            signal = ExternalSignal.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid signal: {exc}")
+
+        profile.add_external_signal(signal)
+        return 200, _json_bytes({"added": True, "signal_count": len(profile.external.external_signals)})
+
+    def _handle_close_context_profile(self, ctx: _ServerContext, profile_id: str) -> tuple[int, bytes]:
+        """DELETE /v1/context/{profile_id} — Close/archive a profile."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        closed = ctx.runtime.context_profiles.close_profile(profile_id)
+        if not closed:
+            return _error(404, "not_found", f"Context profile not found: {profile_id}")
+        return 200, _json_bytes({"closed": True, "profile_id": profile_id})
+
+    def _handle_list_context_profiles(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/context — List profiles with filters."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Context profiles require a GovernanceRuntime")
+        params = self._query_params()
+        agent_id = params.get("agent_id")
+        profile_type = params.get("profile_type")
+        active_str = params.get("active", "true")
+        active_only = active_str.lower() != "false"
+        profiles = ctx.runtime.context_profiles.list_profiles(
+            agent_id=agent_id,
+            profile_type=profile_type,
+            active_only=active_only,
+        )
+        return 200, _json_bytes({
+            "profiles": [p.summary() for p in profiles],
+            "total": len(profiles),
+        })
 
 
 # ── Server context ──────────────────────────────────────────────────────

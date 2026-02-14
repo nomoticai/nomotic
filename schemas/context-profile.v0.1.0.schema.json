@@ -1,0 +1,879 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomotic.ai/schema/context-profile/v0.1.0",
+  "title": "Nomotic Context Profile",
+  "description": "A structured representation of the operational context surrounding an AI agent's actions within the Nomotic governance framework. Context Profiles provide the situational, relational, temporal, and historical information that governance systems use alongside Reasoning Artifacts to make informed evaluation decisions.",
+  "type": "object",
+  "required": ["profile_id", "agent_id", "profile_type", "created_at", "updated_at"],
+  "additionalProperties": false,
+
+  "properties": {
+    "profile_id": {
+      "type": "string",
+      "description": "Unique identifier for this context profile.",
+      "minLength": 1,
+      "examples": ["cp-20260214-x9k2m"]
+    },
+
+    "agent_id": {
+      "type": "string",
+      "description": "Unique identifier for the agent this context profile belongs to.",
+      "minLength": 1
+    },
+
+    "profile_type": {
+      "type": "string",
+      "description": "The scope and lifecycle semantics of this context profile.",
+      "enum": ["workflow", "session", "operational_period"]
+    },
+
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when this context profile was created."
+    },
+
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the most recent update to this context profile."
+    },
+
+    "active": {
+      "type": "boolean",
+      "description": "Whether this context profile is currently active. Inactive profiles are retained for historical reference."
+    },
+
+    "workflow": {
+      "type": "object",
+      "description": "Tracks the state and progress of multi-step workflows. Provides governance with visibility into what has been done, what remains, and how steps relate to each other.",
+      "additionalProperties": false,
+      "properties": {
+        "workflow_id": {
+          "type": "string",
+          "description": "Unique identifier for the workflow this context is tracking."
+        },
+        "workflow_type": {
+          "type": "string",
+          "description": "Categorization of the workflow (e.g., 'data_pipeline', 'approval_chain', 'incident_response')."
+        },
+        "total_steps": {
+          "type": "integer",
+          "description": "Total number of steps in the workflow plan.",
+          "minimum": 1
+        },
+        "current_step": {
+          "type": "integer",
+          "description": "The step number currently being executed (1-indexed).",
+          "minimum": 1
+        },
+        "steps_completed": {
+          "type": "array",
+          "description": "Record of steps that have been completed, including their outcomes.",
+          "items": {
+            "$ref": "#/$defs/CompletedStep"
+          }
+        },
+        "steps_remaining": {
+          "type": "array",
+          "description": "Steps that have not yet been executed, with planned details.",
+          "items": {
+            "$ref": "#/$defs/PlannedStep"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "description": "Explicit dependency relationships between workflow steps.",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        },
+        "rollback_points": {
+          "type": "array",
+          "description": "Identifiers of steps that serve as safe rollback targets if subsequent steps fail.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when the workflow began execution."
+        },
+        "status": {
+          "type": "string",
+          "description": "Current operational status of the workflow.",
+          "enum": ["active", "paused", "completing", "rolling_back"]
+        }
+      }
+    },
+
+    "situational": {
+      "type": "object",
+      "description": "Captures the immediate circumstances that initiated and shape the current operation. Helps governance understand why the agent is acting and under what conditions.",
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "type": "string",
+          "description": "What initiated the current operation.",
+          "enum": ["user_request", "scheduled", "event_triggered", "agent_initiated", "escalation_received"]
+        },
+        "trigger_description": {
+          "type": "string",
+          "description": "Human-readable description of what specifically triggered this operation."
+        },
+        "operational_mode": {
+          "type": "string",
+          "description": "The current operational mode of the system, which may affect governance thresholds and policies.",
+          "enum": ["normal", "incident_response", "maintenance", "degraded", "high_volume"]
+        },
+        "urgency": {
+          "type": "string",
+          "description": "The urgency level of the current operation, influencing evaluation speed and tolerance.",
+          "enum": ["routine", "elevated", "urgent", "critical"]
+        },
+        "origin_id": {
+          "type": "string",
+          "description": "Identifier for the originating entity. For user requests, this should be a hashed identifier to protect privacy."
+        },
+        "initiating_entity": {
+          "type": "string",
+          "description": "Description or identifier of the entity that initiated the operation (e.g., a user role, system component, or upstream agent)."
+        }
+      }
+    },
+
+    "relational": {
+      "type": "object",
+      "description": "Describes the agent's relationships with other agents in a multi-agent system. Enables governance to understand delegation chains, shared responsibilities, and compound actions.",
+      "additionalProperties": false,
+      "properties": {
+        "parent_agent_id": {
+          "type": "string",
+          "description": "Identifier of the agent that delegated work to this agent, if applicable."
+        },
+        "child_agent_ids": {
+          "type": "array",
+          "description": "Identifiers of agents this agent has delegated work to.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "delegation_chain": {
+          "type": "array",
+          "description": "The full chain of delegation from the originating agent to the current agent.",
+          "items": {
+            "$ref": "#/$defs/DelegationLink"
+          }
+        },
+        "shared_workflow_agents": {
+          "type": "array",
+          "description": "Identifiers of other agents participating in the same workflow.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compound_methods": {
+          "type": "array",
+          "description": "Actions that require coordination between multiple agents to execute.",
+          "items": {
+            "$ref": "#/$defs/CompoundMethod"
+          }
+        }
+      }
+    },
+
+    "temporal": {
+      "type": "object",
+      "description": "Provides time-related context that may influence governance decisions. Captures when things are happening, time pressures, and temporally relevant events.",
+      "additionalProperties": false,
+      "properties": {
+        "current_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of the current time when this context was assembled."
+        },
+        "time_of_day_category": {
+          "type": "string",
+          "description": "Categorization of the current time period, which may affect governance policies (e.g., stricter controls after hours).",
+          "enum": ["business_hours", "after_hours", "weekend", "holiday"]
+        },
+        "operational_state": {
+          "type": "string",
+          "description": "The current operational state of the environment relative to normal operations.",
+          "enum": ["normal", "peak", "maintenance_window", "post_incident"]
+        },
+        "recent_events": {
+          "type": "array",
+          "description": "Temporally relevant events that may influence governance evaluation.",
+          "items": {
+            "$ref": "#/$defs/TemporalEvent"
+          }
+        },
+        "time_pressure": {
+          "type": "string",
+          "description": "The degree of time pressure on the current operation.",
+          "enum": ["none", "moderate", "high"]
+        },
+        "deadline": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of the deadline for the current operation, if one exists."
+        }
+      }
+    },
+
+    "historical": {
+      "type": "object",
+      "description": "Captures the agent's track record and behavioral trends. Enables governance to calibrate trust and detect drift over time.",
+      "additionalProperties": false,
+      "properties": {
+        "trust_current": {
+          "type": "number",
+          "description": "The agent's current trust score as determined by governance (0.0 = no trust, 1.0 = full trust).",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "trust_direction": {
+          "type": "string",
+          "description": "The trend direction of the agent's trust score.",
+          "enum": ["rising", "falling", "stable", "volatile"]
+        },
+        "trust_trajectory_summary": {
+          "type": "string",
+          "description": "Human-readable summary of how and why the agent's trust has changed recently."
+        },
+        "recent_verdicts": {
+          "type": "array",
+          "description": "The most recent governance verdicts for this agent's actions, providing a window into recent performance.",
+          "items": {
+            "$ref": "#/$defs/RecentVerdict"
+          },
+          "maxItems": 20
+        },
+        "scope_changes_recent": {
+          "type": "array",
+          "description": "Descriptions of recent changes to the agent's authorized scope or permissions.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasoning_quality_trend": {
+          "type": "string",
+          "description": "Trend in the quality of the agent's reasoning as assessed by governance.",
+          "enum": ["improving", "stable", "declining"]
+        },
+        "behavioral_drift_status": {
+          "type": "string",
+          "description": "Assessment of whether the agent's behavior is drifting from its established baseline patterns.",
+          "enum": ["normal", "low_drift", "moderate_drift", "high_drift", "critical_drift"]
+        },
+        "days_since_activation": {
+          "type": "integer",
+          "description": "Number of days since the agent was first activated, providing lifecycle context.",
+          "minimum": 0
+        }
+      }
+    },
+
+    "input_context": {
+      "type": "object",
+      "description": "Characterizes the input that is driving the current action. Helps governance understand the nature, complexity, and potential risks of what the agent is processing.",
+      "additionalProperties": false,
+      "properties": {
+        "input_type": {
+          "type": "string",
+          "description": "The format or channel through which the input was received.",
+          "enum": ["text", "structured", "api_call", "event", "delegation"]
+        },
+        "input_summary": {
+          "type": "string",
+          "description": "Brief summary of the input content without exposing sensitive details."
+        },
+        "input_category": {
+          "type": "string",
+          "description": "Classification of the input's complexity and risk profile.",
+          "enum": ["standard_request", "edge_case", "ambiguous", "complex", "adversarial_pattern"]
+        },
+        "entities_referenced": {
+          "type": "array",
+          "description": "Key entities (systems, users, data objects) referenced in the input.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints_expressed": {
+          "type": "array",
+          "description": "Constraints explicitly stated or implied in the input.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "intent_classification": {
+          "type": "string",
+          "description": "The agent's classification of the input's intent (e.g., 'information_retrieval', 'state_mutation', 'authorization_request')."
+        },
+        "input_hash": {
+          "type": "string",
+          "description": "A hash of the input for deduplication and audit trail purposes without storing raw input."
+        }
+      }
+    },
+
+    "output": {
+      "type": "object",
+      "description": "Tracks what the agent has produced so far within the current context. Enables governance to assess cumulative impact and reversibility.",
+      "additionalProperties": false,
+      "properties": {
+        "outputs_produced": {
+          "type": "array",
+          "description": "Record of outputs the agent has produced during this context.",
+          "items": {
+            "$ref": "#/$defs/OutputRecord"
+          }
+        },
+        "cumulative_impact": {
+          "type": "string",
+          "description": "Assessment of the total impact of all outputs produced so far.",
+          "enum": ["minimal", "moderate", "significant", "major"]
+        },
+        "external_effects": {
+          "type": "array",
+          "description": "Descriptions of effects that have propagated beyond the agent's immediate scope.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reversible": {
+          "type": "boolean",
+          "description": "Whether the cumulative outputs can be reversed or rolled back."
+        }
+      }
+    },
+
+    "external": {
+      "type": "object",
+      "description": "Captures signals and conditions from outside the agent's immediate operational scope. Provides environmental awareness for governance decisions.",
+      "additionalProperties": false,
+      "properties": {
+        "external_signals": {
+          "type": "array",
+          "description": "Signals received from external sources that may be relevant to governance evaluation.",
+          "items": {
+            "$ref": "#/$defs/ExternalSignal"
+          }
+        },
+        "data_freshness": {
+          "type": "object",
+          "description": "Map of data source identifiers to ISO 8601 timestamps indicating when each source was last refreshed.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "environment_status": {
+          "type": "string",
+          "description": "Overall status of the external environment the agent operates within.",
+          "enum": ["normal", "degraded", "outage", "recovery"]
+        },
+        "active_alerts": {
+          "type": "array",
+          "description": "Currently active alerts from external monitoring systems that may affect governance decisions.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+
+    "meta": {
+      "type": "object",
+      "description": "Governance-level metadata about the evaluation lifecycle. Tracks how many times the agent's actions have been evaluated, revised, escalated, or denied within this context.",
+      "additionalProperties": false,
+      "properties": {
+        "evaluation_count": {
+          "type": "integer",
+          "description": "Number of governance evaluations that have occurred within this context.",
+          "minimum": 0
+        },
+        "revise_count": {
+          "type": "integer",
+          "description": "Number of times the agent has been asked to revise its reasoning or actions.",
+          "minimum": 0
+        },
+        "escalation_count": {
+          "type": "integer",
+          "description": "Number of times actions have been escalated to higher authority within this context.",
+          "minimum": 0
+        },
+        "denial_count": {
+          "type": "integer",
+          "description": "Number of times the agent's proposed actions have been denied by governance.",
+          "minimum": 0
+        },
+        "governance_load": {
+          "type": "string",
+          "description": "Assessment of the current governance processing load, which may affect evaluation depth.",
+          "enum": ["normal", "elevated", "high"]
+        },
+        "previous_artifact_ids": {
+          "type": "array",
+          "description": "Identifiers of reasoning artifacts previously submitted within this context.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resubmission": {
+          "type": "boolean",
+          "description": "Whether the current action is a resubmission of a previously denied or revised action."
+        },
+        "original_artifact_id": {
+          "type": "string",
+          "description": "If this is a resubmission, the identifier of the original reasoning artifact that was denied or required revision."
+        }
+      }
+    },
+
+    "feedback": {
+      "type": "object",
+      "description": "Captures feedback, overrides, and outcome data from previous actions. Enables governance to incorporate learning signals into future evaluations.",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_received": {
+          "type": "array",
+          "description": "Feedback records from various sources about the agent's performance.",
+          "items": {
+            "$ref": "#/$defs/FeedbackRecord"
+          }
+        },
+        "override_history": {
+          "type": "array",
+          "description": "Record of governance verdicts that were overridden by authorized entities.",
+          "items": {
+            "$ref": "#/$defs/OverrideRecord"
+          }
+        },
+        "downstream_outcomes": {
+          "type": "array",
+          "description": "Observed outcomes of previously approved actions, enabling closed-loop governance.",
+          "items": {
+            "$ref": "#/$defs/OutcomeRecord"
+          }
+        },
+        "satisfaction_signals": {
+          "type": "array",
+          "description": "Qualitative signals indicating stakeholder satisfaction or dissatisfaction with agent behavior.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "CompletedStep": {
+      "type": "object",
+      "description": "A workflow step that has been executed, with its outcome recorded.",
+      "required": ["step_id", "step_number", "method", "target", "verdict", "ucs", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "step_id": {
+          "type": "string",
+          "description": "Unique identifier for this completed step."
+        },
+        "step_number": {
+          "type": "integer",
+          "description": "The ordinal position of this step in the workflow (1-indexed).",
+          "minimum": 1
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "target": {
+          "type": "string",
+          "description": "The target of the action that was executed in this step."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "The governance verdict that was rendered for this step."
+        },
+        "ucs": {
+          "type": "number",
+          "description": "The Unified Confidence Score assigned to this step's evaluation (0.0 = lowest confidence, 1.0 = highest confidence).",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when this step was completed."
+        },
+        "output_summary": {
+          "type": "string",
+          "description": "Brief summary of what this step produced or accomplished."
+        }
+      }
+    },
+
+    "PlannedStep": {
+      "type": "object",
+      "description": "A workflow step that has not yet been executed.",
+      "required": ["step_number", "method", "target", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "step_number": {
+          "type": "integer",
+          "description": "The ordinal position of this step in the workflow (1-indexed).",
+          "minimum": 1
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "target": {
+          "type": "string",
+          "description": "The target of the action planned for this step."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this step will accomplish."
+        },
+        "estimated_risk": {
+          "type": "string",
+          "description": "Estimated risk level of executing this step.",
+          "enum": ["low", "medium", "high"]
+        },
+        "depends_on": {
+          "type": "array",
+          "description": "Step numbers that must be completed before this step can execute.",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+
+    "Dependency": {
+      "type": "object",
+      "description": "An explicit dependency relationship between two workflow steps.",
+      "required": ["from_step", "to_step", "dependency_type", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "from_step": {
+          "type": "integer",
+          "description": "The step number that is the source of the dependency.",
+          "minimum": 1
+        },
+        "to_step": {
+          "type": "integer",
+          "description": "The step number that depends on the source step.",
+          "minimum": 1
+        },
+        "dependency_type": {
+          "type": "string",
+          "description": "The nature of the dependency relationship between steps.",
+          "enum": ["requires", "constrains", "enables", "informs"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of why this dependency exists."
+        }
+      }
+    },
+
+    "DelegationLink": {
+      "type": "object",
+      "description": "A single link in a delegation chain, representing one agent delegating specific methods to another.",
+      "required": ["from_id", "to_id", "delegated_methods", "delegated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "from_id": {
+          "type": "string",
+          "description": "Identifier of the agent delegating authority."
+        },
+        "to_id": {
+          "type": "string",
+          "description": "Identifier of the agent receiving delegated authority."
+        },
+        "delegated_methods": {
+          "type": "array",
+          "description": "The methods from the Nomotic method taxonomy that have been delegated.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "delegated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when this delegation occurred."
+        }
+      }
+    },
+
+    "CompoundMethod": {
+      "type": "object",
+      "description": "An action that requires coordination between multiple agents, referencing the Nomotic method taxonomy.",
+      "required": ["method", "agents_involved", "combined_scope_description"],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "agents_involved": {
+          "type": "array",
+          "description": "Identifiers of the agents that must coordinate to execute this method.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "combined_scope_description": {
+          "type": "string",
+          "description": "Description of the combined scope of authority required across all participating agents."
+        }
+      }
+    },
+
+    "TemporalEvent": {
+      "type": "object",
+      "description": "A temporally relevant event that may influence governance evaluation.",
+      "required": ["event_type", "description", "occurred_at", "relevance"],
+      "additionalProperties": false,
+      "properties": {
+        "event_type": {
+          "type": "string",
+          "description": "Category of the temporal event (e.g., 'deployment', 'incident', 'policy_change', 'system_update')."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what happened."
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when the event occurred."
+        },
+        "relevance": {
+          "type": "string",
+          "description": "Explanation of why this event is relevant to the current governance context."
+        }
+      }
+    },
+
+    "RecentVerdict": {
+      "type": "object",
+      "description": "A recent governance verdict rendered for this agent.",
+      "required": ["method", "target", "verdict", "ucs", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "target": {
+          "type": "string",
+          "description": "The target of the action that was evaluated."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "The governance verdict that was rendered."
+        },
+        "ucs": {
+          "type": "number",
+          "description": "The Unified Confidence Score assigned to this verdict (0.0 = lowest confidence, 1.0 = highest confidence).",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when this verdict was rendered."
+        }
+      }
+    },
+
+    "OutputRecord": {
+      "type": "object",
+      "description": "A record of an output produced by the agent during this context.",
+      "required": ["step_number", "method", "target", "output_type", "output_summary", "reversible", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "step_number": {
+          "type": "integer",
+          "description": "The workflow step number that produced this output.",
+          "minimum": 1
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "target": {
+          "type": "string",
+          "description": "The target of the action that produced this output."
+        },
+        "output_type": {
+          "type": "string",
+          "description": "Classification of the output's nature and impact category.",
+          "enum": ["data_modification", "communication", "transaction", "configuration", "report"]
+        },
+        "output_summary": {
+          "type": "string",
+          "description": "Brief description of what was produced."
+        },
+        "reversible": {
+          "type": "boolean",
+          "description": "Whether this specific output can be reversed or rolled back."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when this output was produced."
+        }
+      }
+    },
+
+    "ExternalSignal": {
+      "type": "object",
+      "description": "A signal received from an external source that may be relevant to governance evaluation.",
+      "required": ["source", "signal_type", "description", "severity", "received_at"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "The category of external source that produced this signal.",
+          "enum": ["market_data", "threat_intel", "regulatory_alert", "system_monitor", "custom"]
+        },
+        "signal_type": {
+          "type": "string",
+          "description": "Specific type of signal within the source category (e.g., 'price_spike', 'vulnerability_disclosure')."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the signal and its potential implications."
+        },
+        "severity": {
+          "type": "string",
+          "description": "Severity level of the signal.",
+          "enum": ["info", "warning", "alert", "critical"]
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when this signal was received."
+        }
+      }
+    },
+
+    "FeedbackRecord": {
+      "type": "object",
+      "description": "A feedback record from a stakeholder or system about the agent's performance.",
+      "required": ["source", "feedback_type", "description", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "The category of entity that provided this feedback.",
+          "enum": ["user", "manager", "system", "downstream_service"]
+        },
+        "feedback_type": {
+          "type": "string",
+          "description": "Classification of the feedback's nature.",
+          "enum": ["positive", "negative", "correction", "complaint", "override"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the feedback."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when this feedback was received."
+        }
+      }
+    },
+
+    "OverrideRecord": {
+      "type": "object",
+      "description": "A record of a governance verdict that was overridden by an authorized entity.",
+      "required": ["step_number", "original_verdict", "override_to", "overridden_by", "reason", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "step_number": {
+          "type": "integer",
+          "description": "The workflow step number whose verdict was overridden.",
+          "minimum": 1
+        },
+        "original_verdict": {
+          "type": "string",
+          "description": "The governance verdict that was originally rendered."
+        },
+        "override_to": {
+          "type": "string",
+          "description": "The verdict that the override changed it to."
+        },
+        "overridden_by": {
+          "type": "string",
+          "description": "Identifier of the entity that performed the override."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Justification provided for the override."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when the override occurred."
+        }
+      }
+    },
+
+    "OutcomeRecord": {
+      "type": "object",
+      "description": "A record comparing the expected and actual outcomes of a previously approved action.",
+      "required": ["step_number", "method", "expected_outcome", "actual_outcome", "outcome_quality", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "step_number": {
+          "type": "integer",
+          "description": "The workflow step number whose outcome is being recorded.",
+          "minimum": 1
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "expected_outcome": {
+          "type": "string",
+          "description": "What the agent expected to happen when the action was approved."
+        },
+        "actual_outcome": {
+          "type": "string",
+          "description": "What actually happened after the action was executed."
+        },
+        "outcome_quality": {
+          "type": "string",
+          "description": "Assessment of how the actual outcome compared to the expected outcome.",
+          "enum": ["as_expected", "better", "worse", "failed"]
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when the outcome was observed."
+        }
+      }
+    },
+
+    "Method": {
+      "type": "string",
+      "description": "A standardized action method from the Nomotic method taxonomy. All method fields in this schema reference this shared taxonomy to ensure consistent action classification across the governance framework.",
+      "enum": [
+        "query", "read", "write", "update", "delete", "archive", "restore", "export", "import",
+        "fetch", "search", "find", "scan", "filter", "extract", "pull",
+        "approve", "deny", "escalate", "recommend", "classify", "prioritize", "evaluate", "validate", "check", "rank", "predict",
+        "notify", "request", "respond", "reply", "broadcast", "subscribe", "publish", "send", "call",
+        "schedule", "assign", "delegate", "invoke", "retry", "cancel", "pause", "resume", "route", "run", "start", "open",
+        "transfer", "refund", "charge", "reserve", "release", "reconcile", "purchase",
+        "authenticate", "authorize", "revoke", "elevate", "sign", "register",
+        "configure", "deploy", "monitor", "report", "log", "audit", "sync",
+        "generate", "create", "summarize", "transform", "translate", "normalize", "merge", "link", "map", "make",
+        "set", "take", "show", "turn", "break", "submit"
+      ]
+    }
+  }
+}
