@@ -377,6 +377,7 @@ class ReasoningArtifact:
     envelope_id: str = ""
     session_id: str = ""
     origin_id: str = ""
+    context_profile_id: str = ""  # reference to ContextProfile
 
     # Optional reasoning narrative
     narrative: str = ""
@@ -411,6 +412,8 @@ class ReasoningArtifact:
         }
         if self.origin_id:
             task["origin_id"] = self.origin_id
+        if self.context_profile_id:
+            task["context_profile_id"] = self.context_profile_id
 
         reasoning: dict[str, Any] = {
             "factors": [f.to_dict() for f in self.factors],
@@ -480,6 +483,7 @@ class ReasoningArtifact:
             goal=task["goal"],
             origin=task["origin"],
             origin_id=task.get("origin_id", ""),
+            context_profile_id=task.get("context_profile_id", ""),
             constraints_identified=[Constraint.from_dict(c) for c in task["constraints_identified"]],
             factors=[Factor.from_dict(f) for f in reasoning["factors"]],
             alternatives_considered=[Alternative.from_dict(a) for a in reasoning["alternatives_considered"]],

@@ -163,6 +163,10 @@ class GovernanceRuntime:
             self._owner_activity = None
             self._user_tracker = None
 
+        # Context profiles (Phase 7A)
+        from nomotic.context_profile import ContextProfileManager
+        self.context_profiles = ContextProfileManager()
+
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
         self._cert_map: dict[str, str] = {}  # agent_id -> certificate_id
@@ -851,6 +855,17 @@ class GovernanceRuntime:
     def user_tracker(self) -> Any:
         """The user activity tracker, or None if auditing is disabled."""
         return self._user_tracker
+
+    # ── Context Profile convenience methods (Phase 7A) ────────────
+
+    def get_context_profile(self, profile_id: str) -> Any:
+        """Retrieve a context profile by ID."""
+        return self.context_profiles.get_profile(profile_id)
+
+    def create_context_profile(self, agent_id: str, **kwargs: Any) -> Any:
+        """Create a new context profile for an agent."""
+        from nomotic.context_profile import ContextProfile
+        return self.context_profiles.create_profile(agent_id, **kwargs)
 
     def _append_history(self, agent_id: str, record: ActionRecord) -> None:
         history = self._action_history.setdefault(agent_id, [])
