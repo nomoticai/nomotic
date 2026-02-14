@@ -82,6 +82,8 @@ _USER_STATS_RE = re.compile(r"^/v1/user/([^/]+)/stats$")
 _CONTEXT_PROFILE_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)$")
 _CONTEXT_PROFILE_ACTION_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/(summary|risks|feedback|signal|modifications)$")
 _CONTEXT_PROFILE_STEP_RE = re.compile(r"^/v1/context/(cp-[a-f0-9]+)/workflow/step$")
+_WORKFLOW_GOV_RE = re.compile(r"^/v1/workflow/([^/]+)/(assessment|dependencies|projection|drift)$")
+_WORKFLOW_GOV_STEP_RE = re.compile(r"^/v1/workflow/([^/]+)/assess-step$")
 
 
 # ── Request handler ─────────────────────────────────────────────────────
@@ -297,6 +299,23 @@ class _Handler(BaseHTTPRequestHandler):
             return self._handle_schema(ctx)
         if path == "/v1/schema/version" and method == "GET":
             return self._handle_schema_version(ctx)
+
+        # ── Workflow Governance (Phase 7C) ───────────────────────────
+        m = _WORKFLOW_GOV_STEP_RE.match(path)
+        if m and method == "POST":
+            return self._handle_workflow_assess_step(ctx, m.group(1))
+
+        m = _WORKFLOW_GOV_RE.match(path)
+        if m and method == "GET":
+            workflow_id, action = m.group(1), m.group(2)
+            if action == "assessment":
+                return self._handle_workflow_assessment(ctx, workflow_id)
+            if action == "dependencies":
+                return self._handle_workflow_dependencies(ctx, workflow_id)
+            if action == "projection":
+                return self._handle_workflow_projection(ctx, workflow_id)
+            if action == "drift":
+                return self._handle_workflow_drift(ctx, workflow_id)
 
         # ── Context Profiles (Phase 7A) ──────────────────────────────
         if path == "/v1/context":
@@ -974,6 +993,137 @@ class _Handler(BaseHTTPRequestHandler):
             return _error(404, "not_found", "Protocol evaluator not configured")
         versions = ctx.evaluator.get_supported_versions()
         return 200, _json_bytes({"supported_versions": versions})
+
+    # ── Workflow Governance (Phase 7C) ──────────────────────────────────
+
+    def _handle_workflow_assessment(self, ctx: _ServerContext, workflow_id: str) -> tuple[int, bytes]:
+        """GET /v1/workflow/{workflow_id}/assessment — Full workflow risk assessment."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Workflow governance requires a GovernanceRuntime")
+        if ctx.runtime.workflow_governor is None:
+            return _error(404, "not_found", "Workflow Governor is not enabled")
+
+        # Find profile by workflow_id
+        profile = self._find_workflow_profile(ctx, workflow_id)
+        if profile is None:
+            return _error(404, "not_found", f"No profile found for workflow: {workflow_id}")
+
+        assessment = ctx.runtime.workflow_governor.assess_workflow(workflow_id, profile)
+        return 200, _json_bytes(assessment.to_dict())
+
+    def _handle_workflow_dependencies(self, ctx: _ServerContext, workflow_id: str) -> tuple[int, bytes]:
+        """GET /v1/workflow/{workflow_id}/dependencies — Dependency graph data."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Workflow governance requires a GovernanceRuntime")
+
+        profile = self._find_workflow_profile(ctx, workflow_id)
+        if profile is None:
+            return _error(404, "not_found", f"No profile found for workflow: {workflow_id}")
+        if profile.workflow is None:
+            return _error(400, "validation_error", "Profile has no workflow context")
+
+        from nomotic.workflow_governor import DependencyGraph
+        graph = DependencyGraph.from_workflow_context(profile.workflow)
+
+        # Build visualization data
+        nodes = sorted(graph._all_steps)
+        edges = []
+        for from_step, fwd_list in graph._forward.items():
+            for to_step, dep_type, desc in fwd_list:
+                edges.append({
+                    "from": from_step,
+                    "to": to_step,
+                    "type": dep_type,
+                    "description": desc,
+                })
+
+        cp = graph.critical_path()
+        return 200, _json_bytes({
+            "workflow_id": workflow_id,
+            "nodes": nodes,
+            "edges": edges,
+            "critical_path": cp,
+        })
+
+    def _handle_workflow_projection(self, ctx: _ServerContext, workflow_id: str) -> tuple[int, bytes]:
+        """GET /v1/workflow/{workflow_id}/projection — Projected risks."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Workflow governance requires a GovernanceRuntime")
+        if ctx.runtime.workflow_governor is None:
+            return _error(404, "not_found", "Workflow Governor is not enabled")
+
+        profile = self._find_workflow_profile(ctx, workflow_id)
+        if profile is None:
+            return _error(404, "not_found", f"No profile found for workflow: {workflow_id}")
+
+        assessment = ctx.runtime.workflow_governor.assess_workflow(workflow_id, profile)
+        return 200, _json_bytes({
+            "workflow_id": workflow_id,
+            "projected_risks": [r.to_dict() for r in assessment.projected_risks],
+            "total": len(assessment.projected_risks),
+        })
+
+    def _handle_workflow_drift(self, ctx: _ServerContext, workflow_id: str) -> tuple[int, bytes]:
+        """GET /v1/workflow/{workflow_id}/drift — Cross-step drift analysis."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Workflow governance requires a GovernanceRuntime")
+        if ctx.runtime.workflow_governor is None:
+            return _error(404, "not_found", "Workflow Governor is not enabled")
+
+        profile = self._find_workflow_profile(ctx, workflow_id)
+        if profile is None:
+            return _error(404, "not_found", f"No profile found for workflow: {workflow_id}")
+
+        drift = ctx.runtime.workflow_governor.detect_cross_step_drift(profile)
+        if drift is None:
+            return 200, _json_bytes({
+                "workflow_id": workflow_id,
+                "drift_detected": False,
+                "message": "Insufficient data for drift analysis (< 6 completed steps)",
+            })
+        return 200, _json_bytes(drift.to_dict())
+
+    def _handle_workflow_assess_step(self, ctx: _ServerContext, workflow_id: str) -> tuple[int, bytes]:
+        """POST /v1/workflow/{workflow_id}/assess-step — Assess a specific step."""
+        if ctx.runtime is None:
+            return _error(404, "not_found", "Workflow governance requires a GovernanceRuntime")
+        if ctx.runtime.workflow_governor is None:
+            return _error(404, "not_found", "Workflow Governor is not enabled")
+
+        data = self._read_json()
+        step_number = data.get("step_number")
+        method = data.get("method", "unknown")
+        target = data.get("target", "unknown")
+
+        if step_number is None:
+            return _error(400, "validation_error", "Missing 'step_number' field")
+
+        profile = self._find_workflow_profile(ctx, workflow_id)
+        if profile is None:
+            return _error(404, "not_found", f"No profile found for workflow: {workflow_id}")
+
+        from nomotic.types import Action, AgentContext, TrustProfile
+        action = Action(agent_id=profile.agent_id, action_type=method, target=target)
+        trust_profile = ctx.runtime.get_trust_profile(profile.agent_id)
+        agent_context = AgentContext(
+            agent_id=profile.agent_id,
+            trust_profile=trust_profile,
+        )
+
+        assessment = ctx.runtime.workflow_governor.assess_step(
+            step_number, action, agent_context, profile,
+        )
+        return 200, _json_bytes(assessment.to_dict())
+
+    def _find_workflow_profile(self, ctx: _ServerContext, workflow_id: str) -> Any:
+        """Find a context profile by workflow_id."""
+        if ctx.runtime is None:
+            return None
+        profiles = ctx.runtime.context_profiles.list_profiles(active_only=False)
+        for p in profiles:
+            if p.workflow is not None and p.workflow.workflow_id == workflow_id:
+                return p
+        return None
 
     # ── Context Profiles (Phase 7A) ──────────────────────────────────
 

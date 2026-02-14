@@ -70,6 +70,8 @@ class RuntimeConfig:
     provenance_max_records: int = 5000
     enable_contextual_modifier: bool = True
     modifier_config: Any = None  # ModifierConfig from contextual_modifier
+    enable_workflow_governor: bool = True
+    workflow_governor_config: Any = None  # WorkflowGovernorConfig from workflow_governor
 
 
 class GovernanceRuntime:
@@ -178,6 +180,15 @@ class GovernanceRuntime:
         else:
             self.contextual_modifier = None
 
+        # Workflow Governor (Phase 7C)
+        if self.config.enable_workflow_governor:
+            from nomotic.workflow_governor import WorkflowGovernor
+            self.workflow_governor: WorkflowGovernor | None = WorkflowGovernor(
+                config=self.config.workflow_governor_config,
+            )
+        else:
+            self.workflow_governor = None
+
         # Certificate authority — initialized lazily or explicitly
         self._ca: CertificateAuthority | None = None
         self._cert_map: dict[str, str] = {}  # agent_id -> certificate_id
@@ -199,7 +210,7 @@ class GovernanceRuntime:
         self.trust_calibrator.apply_time_decay(context.agent_id)
         context.trust_profile = self.trust_calibrator.get_profile(context.agent_id)
 
-        # Step 1b: Apply contextual modifier (Phase 7B)
+        # Step 1b: Apply workflow governor (Phase 7C) and contextual modifier (Phase 7B)
         context_modification = None
         original_weights: dict[str, float] = {}
         if (
@@ -208,6 +219,23 @@ class GovernanceRuntime:
         ):
             profile = self.context_profiles.get_profile(context.context_profile_id)
             if profile is not None:
+                # Workflow Governor: assess step before modifier
+                if (
+                    self.workflow_governor is not None
+                    and profile.workflow is not None
+                ):
+                    step_assessment = self.workflow_governor.assess_step(
+                        profile.workflow.current_step,
+                        action,
+                        context,
+                        profile,
+                    )
+                    # Store assessment on profile metadata for modifier consumption
+                    if not hasattr(profile, '_step_assessment'):
+                        object.__setattr__(profile, '_step_assessment', step_assessment)
+                    else:
+                        profile._step_assessment = step_assessment  # type: ignore[attr-defined]
+
                 context_modification = self.contextual_modifier.modify(
                     action, context, profile,
                 )
