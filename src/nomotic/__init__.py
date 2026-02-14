@@ -50,6 +50,25 @@ from nomotic.accountability import (
     UserStats,
 )
 from nomotic.types import UserContext
+from nomotic.protocol import (
+    METHODS,
+    METHOD_CATEGORIES,
+    PROTOCOL_VERSION,
+    Assessment,
+    AuthorityClaim,
+    Condition,
+    Denial,
+    Escalation,
+    GovernanceResponseData,
+    Guidance,
+    IntendedAction,
+    ProtocolVerdict,
+    ReasoningArtifact,
+    ResponseMetadata,
+    validate_artifact,
+)
+from nomotic.token import GovernanceToken, TokenClaims, TokenValidationResult, TokenValidator
+from nomotic.evaluator import EvaluatorConfig, PostHocAssessment, ProtocolEvaluator
 
 __all__ = [
     "Action",
@@ -120,4 +139,27 @@ __all__ = [
     "UserActivityTracker",
     "UserStats",
     "UserContext",
+    # Nomotic Protocol (Phase 6)
+    "METHODS",
+    "METHOD_CATEGORIES",
+    "PROTOCOL_VERSION",
+    "Assessment",
+    "AuthorityClaim",
+    "Condition",
+    "Denial",
+    "Escalation",
+    "GovernanceResponseData",
+    "Guidance",
+    "IntendedAction",
+    "ProtocolVerdict",
+    "ReasoningArtifact",
+    "ResponseMetadata",
+    "validate_artifact",
+    "GovernanceToken",
+    "TokenClaims",
+    "TokenValidationResult",
+    "TokenValidator",
+    "EvaluatorConfig",
+    "PostHocAssessment",
+    "ProtocolEvaluator",
 ]

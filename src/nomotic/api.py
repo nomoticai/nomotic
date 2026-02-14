@@ -27,6 +27,8 @@ from typing import Any
 
 from nomotic.authority import CertificateAuthority
 from nomotic.certificate import AgentCertificate, CertStatus
+from nomotic.evaluator import EvaluatorConfig, ProtocolEvaluator
+from nomotic.protocol import ReasoningArtifact
 from nomotic.registry import (
     ArchetypeRegistry,
     OrganizationRegistry,
@@ -271,6 +273,24 @@ class _Handler(BaseHTTPRequestHandler):
         m = _USER_STATS_RE.match(path)
         if m and method == "GET":
             return self._handle_user_stats(ctx, m.group(1))
+
+        # ── Nomotic Protocol endpoints ─────────────────────────────
+        if path == "/v1/reason" and method == "POST":
+            return self._handle_reason(ctx)
+        if path == "/v1/reason/summary" and method == "POST":
+            return self._handle_reason_summary(ctx)
+        if path == "/v1/reason/posthoc" and method == "POST":
+            return self._handle_reason_posthoc(ctx)
+        if path == "/v1/token/validate" and method == "POST":
+            return self._handle_token_validate(ctx)
+        if path == "/v1/token/introspect" and method == "POST":
+            return self._handle_token_introspect(ctx)
+        if path == "/v1/token/revoke" and method == "POST":
+            return self._handle_token_revoke(ctx)
+        if path == "/v1/schema" and method == "GET":
+            return self._handle_schema(ctx)
+        if path == "/v1/schema/version" and method == "GET":
+            return self._handle_schema_version(ctx)
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -825,6 +845,95 @@ class _Handler(BaseHTTPRequestHandler):
             return _error(404, "not_found", f"No interaction data for user: {user_id}")
         return 200, _json_bytes(stats.to_dict())
 
+    # ── Nomotic Protocol ──────────────────────────────────────────────
+
+    def _handle_reason(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/reason — Full Deliberation Flow."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        data = self._read_json()
+        try:
+            artifact = ReasoningArtifact.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid reasoning artifact: {exc}")
+        response = ctx.evaluator.evaluate(artifact)
+        return 200, _json_bytes(response.to_dict())
+
+    def _handle_reason_summary(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/reason/summary — Summary Flow."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        data = self._read_json()
+        try:
+            artifact = ReasoningArtifact.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid reasoning artifact: {exc}")
+        response = ctx.evaluator.evaluate_summary(artifact)
+        return 200, _json_bytes(response.to_dict())
+
+    def _handle_reason_posthoc(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/reason/posthoc — Post-Hoc Flow."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        data = self._read_json()
+        artifact_data = data.get("artifact", data)
+        action_result = data.get("action_result")
+        try:
+            artifact = ReasoningArtifact.from_dict(artifact_data)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(400, "validation_error", f"Invalid reasoning artifact: {exc}")
+        assessment = ctx.evaluator.evaluate_posthoc(artifact, action_result)
+        return 200, _json_bytes(assessment.to_dict())
+
+    def _handle_token_validate(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/token/validate — Validate a Governance Token."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        data = self._read_json()
+        token = data.get("token")
+        if not token:
+            return _error(400, "validation_error", "Missing 'token' field")
+        result = ctx.evaluator.validate_token(token)
+        return 200, _json_bytes(result.to_dict())
+
+    def _handle_token_introspect(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/token/introspect — Full governance context for a token."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        data = self._read_json()
+        token = data.get("token")
+        if not token:
+            return _error(400, "validation_error", "Missing 'token' field")
+        result = ctx.evaluator.introspect_token(token)
+        if result is None:
+            return _error(400, "validation_error", "Invalid or expired token")
+        return 200, _json_bytes(result)
+
+    def _handle_token_revoke(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """POST /v1/token/revoke — Revoke a token before expiration."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        data = self._read_json()
+        token_id = data.get("token_id")
+        if not token_id:
+            return _error(400, "validation_error", "Missing 'token_id' field")
+        revoked = ctx.evaluator.revoke_token(token_id)
+        return 200, _json_bytes({"revoked": revoked, "token_id": token_id})
+
+    def _handle_schema(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/schema — Returns the current Reasoning Artifact JSON Schema."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        schema = ctx.evaluator.get_schema()
+        return 200, _json_bytes(schema)
+
+    def _handle_schema_version(self, ctx: _ServerContext) -> tuple[int, bytes]:
+        """GET /v1/schema/version — Returns supported schema versions."""
+        if ctx.evaluator is None:
+            return _error(404, "not_found", "Protocol evaluator not configured")
+        versions = ctx.evaluator.get_supported_versions()
+        return 200, _json_bytes({"supported_versions": versions})
+
 
 # ── Server context ──────────────────────────────────────────────────────
 
@@ -839,12 +948,14 @@ class _ServerContext:
         zone_validator: ZoneValidator,
         org_registry: OrganizationRegistry,
         runtime: Any = None,
+        evaluator: ProtocolEvaluator | None = None,
     ) -> None:
         self.ca = ca
         self.archetype_registry = archetype_registry
         self.zone_validator = zone_validator
         self.org_registry = org_registry
         self.runtime = runtime
+        self.evaluator = evaluator
         self.started_at = time.time()
 
 
@@ -872,6 +983,7 @@ class NomoticAPIServer:
         zone_validator: ZoneValidator | None = None,
         org_registry: OrganizationRegistry | None = None,
         runtime: Any = None,
+        evaluator: ProtocolEvaluator | None = None,
         host: str = "0.0.0.0",
         port: int = 8420,
     ) -> None:
@@ -880,6 +992,7 @@ class NomoticAPIServer:
         self._zone_validator = zone_validator or ZoneValidator()
         self._org_registry = org_registry or OrganizationRegistry()
         self._runtime = runtime
+        self._evaluator = evaluator
         self._host = host
         self._port = port
         self._server: NomoticHTTPServer | None = None
@@ -892,6 +1005,7 @@ class NomoticAPIServer:
             zone_validator=self._zone_validator,
             org_registry=self._org_registry,
             runtime=self._runtime,
+            evaluator=self._evaluator,
         )
         return server
 

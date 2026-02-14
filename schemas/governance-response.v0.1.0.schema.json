@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomotic.ai/schema/governance-response/v0.1.0",
+  "title": "Nomotic Governance Response",
+  "description": "The structured response from a Governance Evaluator after evaluating a Reasoning Artifact. Contains the verdict, assessment, and Governance Token if approved.",
+  "type": "object",
+  "required": ["protocol_version", "response_id", "verdict", "assessment", "metadata"],
+  "additionalProperties": false,
+
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+
+    "response_id": {
+      "type": "string",
+      "description": "Unique identifier for this governance response.",
+      "minLength": 1
+    },
+
+    "verdict": {
+      "type": "string",
+      "description": "The governance decision on the submitted reasoning.",
+      "enum": ["PROCEED", "PROCEED_WITH_CONDITIONS", "REVISE", "ESCALATE", "DENY"]
+    },
+
+    "token": {
+      "type": "string",
+      "description": "JWT Governance Token. Present when verdict is PROCEED or PROCEED_WITH_CONDITIONS."
+    },
+
+    "assessment": {
+      "type": "object",
+      "description": "Structured evaluation of the reasoning artifact.",
+      "required": ["completeness", "authority_verified", "alignment", "uncertainty_calibration", "alternatives_adequacy"],
+      "additionalProperties": false,
+      "properties": {
+        "completeness": {
+          "type": "object",
+          "description": "Did the agent identify the relevant constraints?",
+          "required": ["score"],
+          "properties": {
+            "score": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "detail": { "type": "string" },
+            "missing_constraints": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "authority_verified": {
+          "type": "object",
+          "description": "Is the agent's authority claim accurate?",
+          "required": ["verified"],
+          "properties": {
+            "verified": { "type": "boolean" },
+            "detail": { "type": "string" },
+            "actual_envelope": {
+              "type": "string",
+              "description": "If authority claim was inaccurate, the correct authority description."
+            }
+          }
+        },
+        "alignment": {
+          "type": "object",
+          "description": "Does the intended action follow from the stated reasoning?",
+          "required": ["score"],
+          "properties": {
+            "score": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "detail": { "type": "string" },
+            "misalignments": {
+              "type": "array",
+              "description": "Specific points where the action diverges from reasoning.",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "uncertainty_calibration": {
+          "type": "object",
+          "description": "Is the agent's stated confidence appropriate given its unknowns?",
+          "required": ["score"],
+          "properties": {
+            "score": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "detail": { "type": "string" }
+          }
+        },
+        "alternatives_adequacy": {
+          "type": "object",
+          "description": "Did the agent consider sufficient alternatives?",
+          "required": ["score"],
+          "properties": {
+            "score": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "detail": { "type": "string" }
+          }
+        },
+        "dimensional_summary": {
+          "type": "object",
+          "description": "Optional. If the evaluator uses dimensional scoring, per-dimension scores.",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          }
+        },
+        "ucs": {
+          "type": "number",
+          "description": "Optional. Unified Confidence Score if applicable.",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "trust_state": {
+          "type": "number",
+          "description": "Optional. Agent's current trust level if tracked.",
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      }
+    },
+
+    "conditions": {
+      "type": "array",
+      "description": "Present when verdict is PROCEED_WITH_CONDITIONS.",
+      "items": {
+        "type": "object",
+        "required": ["type", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["audit_level", "scope_reduction", "confirmation_required", "time_limit", "monitoring", "notification", "custom"]
+          },
+          "description": { "type": "string" },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+
+    "guidance": {
+      "type": "object",
+      "description": "Present when verdict is REVISE.",
+      "properties": {
+        "missing_constraints": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "authority_correction": {
+          "type": "string"
+        },
+        "reasoning_gaps": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "recommended_factors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["constraint", "context", "precedent", "evidence", "inference", "uncertainty", "alternative", "risk"]
+          }
+        }
+      }
+    },
+
+    "escalation": {
+      "type": "object",
+      "description": "Present when verdict is ESCALATE.",
+      "properties": {
+        "escalation_target": {
+          "type": "string"
+        },
+        "authority_required": {
+          "type": "string"
+        },
+        "context_package": {
+          "type": "string"
+        }
+      }
+    },
+
+    "denial": {
+      "type": "object",
+      "description": "Present when verdict is DENY.",
+      "properties": {
+        "grounds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "veto_dimensions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "remediation": {
+          "type": "string"
+        }
+      }
+    },
+
+    "metadata": {
+      "type": "object",
+      "description": "Evaluation context for audit and traceability.",
+      "required": ["evaluator_id", "evaluation_time_ms", "config_version", "timestamp", "artifact_hash", "protocol_version"],
+      "additionalProperties": false,
+      "properties": {
+        "evaluator_id": {
+          "type": "string"
+        },
+        "evaluation_time_ms": {
+          "type": "number"
+        },
+        "config_version": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "artifact_hash": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        }
+      }
+    }
+  }
+}
