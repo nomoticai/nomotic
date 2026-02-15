@@ -94,6 +94,12 @@ _AUDIT_AGENT_VERIFY_RE = re.compile(r"^/v1/audit/([^/]+)/verify$")
 _AUDIT_AGENT_EXPORT_RE = re.compile(r"^/v1/audit/([^/]+)/export$")
 _AUDIT_AGENT_SEAL_RE = re.compile(r"^/v1/audit/([^/]+)/seal$")
 
+# Test log API (Phase 10B)
+_TESTLOG_AGENT_RECORDS_RE = re.compile(r"^/v1/testlog/([^/]+)/records$")
+_TESTLOG_AGENT_SUMMARY_RE = re.compile(r"^/v1/testlog/([^/]+)/summary$")
+_TESTLOG_AGENT_VERIFY_RE = re.compile(r"^/v1/testlog/([^/]+)/verify$")
+_TESTLOG_AGENT_EXPORT_RE = re.compile(r"^/v1/testlog/([^/]+)/export$")
+
 
 # ── Request handler ─────────────────────────────────────────────────────
 
@@ -286,6 +292,20 @@ class _Handler(BaseHTTPRequestHandler):
         m = _AUDIT_AGENT_SEAL_RE.match(path)
         if m and method == "GET":
             return self._handle_audit_agent_seal(ctx, m.group(1))
+
+        # Testlog routes (persistent, file-based, Phase 10B)
+        m = _TESTLOG_AGENT_RECORDS_RE.match(path)
+        if m and method == "GET":
+            return self._handle_log_records(ctx, m.group(1), "testlog")
+        m = _TESTLOG_AGENT_SUMMARY_RE.match(path)
+        if m and method == "GET":
+            return self._handle_log_summary(ctx, m.group(1), "testlog")
+        m = _TESTLOG_AGENT_VERIFY_RE.match(path)
+        if m and method == "GET":
+            return self._handle_log_verify(ctx, m.group(1), "testlog")
+        m = _TESTLOG_AGENT_EXPORT_RE.match(path)
+        if m and method == "GET":
+            return self._handle_log_export(ctx, m.group(1), "testlog")
 
         # In-memory audit (Phase 5, backward compatibility)
         if path == "/v1/audit" and method == "GET":
@@ -1704,6 +1724,104 @@ class _Handler(BaseHTTPRequestHandler):
                 continue
 
         return _error(404, "not_found", "Agent is not revoked or no seal found")
+
+    # ── Shared log handlers (audit + testlog) ────────────────────────
+
+    def _handle_log_records(
+        self, ctx: _ServerContext, identifier: str, log_type: str,
+    ) -> tuple[int, bytes] | tuple[int, bytes, str]:
+        from nomotic.audit_store import LogStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = LogStore(ctx.base_dir, log_type)
+
+        params = self._query_params()
+        limit = min(int(params.get("limit", "20")), 500)
+        severity = params.get("severity")
+        fmt = params.get("format", "json")
+
+        records = store.query(agent_id, limit=limit, severity=severity)
+
+        since = params.get("since")
+        if since:
+            try:
+                since_ts = float(since)
+                records = [r for r in records if r.timestamp > since_ts]
+            except ValueError:
+                pass
+
+        if fmt == "jsonl":
+            lines = [json.dumps(r.to_dict(), separators=(",", ":")) for r in records]
+            body = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
+            return 200, body, "application/x-ndjson"
+
+        return 200, _json_bytes({
+            "agent_id": agent_id,
+            "log_type": log_type,
+            "records": [r.to_dict() for r in records],
+            "total": len(records),
+            "chain_fields_included": True,
+        })
+
+    def _handle_log_summary(
+        self, ctx: _ServerContext, identifier: str, log_type: str,
+    ) -> tuple[int, bytes]:
+        from nomotic.audit_store import LogStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = LogStore(ctx.base_dir, log_type)
+        summary = store.summary(agent_id)
+
+        if summary.get("total", 0) == 0:
+            return _error(404, "not_found", f"No {log_type} records found for '{agent_id}'")
+
+        summary["agent_id"] = agent_id
+        summary["log_type"] = log_type
+        return 200, _json_bytes(summary)
+
+    def _handle_log_verify(
+        self, ctx: _ServerContext, identifier: str, log_type: str,
+    ) -> tuple[int, bytes]:
+        from nomotic.audit_store import LogStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = LogStore(ctx.base_dir, log_type)
+
+        is_valid, count, message = store.verify_chain(agent_id)
+
+        if count == 0:
+            return _error(404, "not_found", f"No {log_type} records found for '{agent_id}'")
+
+        result: dict[str, Any] = {
+            "agent_id": agent_id,
+            "log_type": log_type,
+            "valid": is_valid,
+            "record_count": count,
+            "message": message,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if is_valid:
+            records = store.query_all(agent_id)
+            result["chain_head"] = records[-1].record_hash if records else ""
+
+        return 200, _json_bytes(result)
+
+    def _handle_log_export(
+        self, ctx: _ServerContext, identifier: str, log_type: str,
+    ) -> tuple[int, bytes] | tuple[int, bytes, str]:
+        from nomotic.audit_store import LogStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = LogStore(ctx.base_dir, log_type)
+
+        records = store.query_all(agent_id)
+        if not records:
+            return _error(404, "not_found", f"No {log_type} records found for '{agent_id}'")
+
+        lines = [json.dumps(r.to_dict(), separators=(",", ":")) for r in records]
+        body = ("\n".join(lines) + "\n").encode("utf-8")
+        return 200, body, "application/x-ndjson"
 
 
 # ── Server context ──────────────────────────────────────────────────────
