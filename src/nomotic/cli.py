@@ -53,6 +53,7 @@ from nomotic.registry import (
     OrganizationRegistry,
     OrgStatus,
     ZoneValidator,
+    _normalize_org_name,
 )
 from nomotic.store import FileCertificateStore
 
@@ -286,7 +287,7 @@ def _cmd_setup(args: argparse.Namespace) -> None:
         prompt += f" [{default_org}]"
     prompt += ": "
     org_input = input(prompt).strip() or default_org
-    org = org_input.lower().replace(" ", "-")
+    org = _normalize_org_name(org_input)
     if org_input != org:
         print(f"    \u2192 Normalized to: {org}")
     print()
@@ -357,8 +358,8 @@ def _cmd_birth(args: argparse.Namespace) -> None:
         print("  Run 'nomotic setup' first, or provide --org.", file=sys.stderr)
         sys.exit(1)
 
-    # Auto-lowercase zone, org, archetype
-    org = org_raw.lower()
+    # Normalize zone, org, archetype
+    org = _normalize_org_name(org_raw)
     zone_path = zone_raw.lower()
     archetype = archetype_raw.lower()
 

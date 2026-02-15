@@ -361,6 +361,9 @@ class TestOrgNameNormalization:
     def test_already_normalized(self) -> None:
         assert _normalize_org_name("acme-corp") == "acme-corp"
 
+    def test_trailing_period_stripped(self) -> None:
+        assert _normalize_org_name("Acme Co.") == "acme-co"
+
     def test_trailing_hyphens_stripped(self) -> None:
         assert _normalize_org_name("acme-") == "acme"
 
