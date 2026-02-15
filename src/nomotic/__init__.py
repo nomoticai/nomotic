@@ -44,6 +44,7 @@ from nomotic.context import ContextCode, CODES
 from nomotic.audit import AuditRecord, AuditTrail, build_justification, verify_chain
 from nomotic.id_registry import AgentIdRegistry
 from nomotic.revocation import create_revocation_seal, load_revocation_seal
+from nomotic.audit_store import AuditStore, PersistentAuditRecord
 from nomotic.provenance import ProvenanceRecord, ProvenanceLog
 from nomotic.accountability import (
     OwnerActivity,
@@ -215,6 +216,8 @@ __all__ = [
     "AgentIdRegistry",
     "create_revocation_seal",
     "load_revocation_seal",
+    "AuditStore",
+    "PersistentAuditRecord",
     "ProvenanceRecord",
     "ProvenanceLog",
     "OwnerActivity",

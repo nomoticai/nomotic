@@ -238,12 +238,14 @@ def _resolve_agent(base: Path, identifier: str) -> tuple[int, str, str]:
             return data.get("agent_numeric_id", 0), data.get("agent_id", ""), identifier
 
     # Try scanning certs for agent name match (old-format without registry)
+    # Case-insensitive comparison
     certs_dir = base / "certs"
+    lookup = identifier.lower()
     if certs_dir.exists():
         for cert_file in certs_dir.glob("nmc-*.json"):
             try:
                 data = json.loads(cert_file.read_text(encoding="utf-8"))
-                if data.get("agent_id") == identifier:
+                if data.get("agent_id", "").lower() == lookup:
                     return (
                         data.get("agent_numeric_id", 0),
                         data.get("agent_id", ""),
@@ -370,9 +372,10 @@ def _cmd_birth(args: argparse.Namespace) -> None:
     registry = _load_registry(args.base_dir)
 
     # Check for duplicate active name within the same org via registry
+    # Case-insensitive name comparison
     existing = registry.list_all(status="ACTIVE")
     for entry in existing:
-        if entry["name"] == args.name and entry["organization"] == org:
+        if entry["name"].lower() == args.name.lower() and entry["organization"] == org:
             print(f"Error: An active agent named '{args.name}' already exists in org '{org}'.", file=sys.stderr)
             print(f"  ID: {entry['agent_id']}, Certificate: {entry['certificate_id']}", file=sys.stderr)
             print(f"  Use a different --name, or revoke the existing agent first.", file=sys.stderr)
@@ -459,7 +462,7 @@ def _cmd_verify(args: argparse.Namespace) -> None:
     if result.valid:
         print(f"VALID — {cert.certificate_id}")
         print(f"  Status: {cert.status.name}")
-        print(f"  Trust:  {cert.trust_score}")
+        print(f"  Trust:  {cert.trust_score:.3f}")
         print(f"  Age:    {cert.behavioral_age}")
     else:
         print(f"INVALID — {cert.certificate_id}")
@@ -532,6 +535,18 @@ def _cmd_revoke(args: argparse.Namespace) -> None:
         except KeyError:
             pass
 
+    # Seal the persistent audit trail
+    from nomotic.audit_store import AuditStore
+    audit_store = AuditStore(args.base_dir)
+    seal_hash = audit_store.seal(name)
+    audit_summary = audit_store.summary(name)
+
+    # Build audit_records list for the revocation seal
+    audit_records = None
+    all_records = audit_store.query_all(name)
+    if all_records:
+        audit_records = [r.to_dict() for r in all_records]
+
     # Create revocation seal
     from nomotic.revocation import create_revocation_seal
     create_revocation_seal(
@@ -541,9 +556,22 @@ def _cmd_revoke(args: argparse.Namespace) -> None:
         certificate_id=cert_id,
         reason=args.reason,
         cert=cert,
+        audit_records=audit_records,
     )
 
+    total_evals = audit_summary.get("total", 0)
+    print()
     print(f"Revoked: {cert.certificate_id}")
+    print()
+    print(f"Agent revoked: {_bold(name)}")
+    print(f"  Certificate: {cert.certificate_id}")
+    print(f"  Status:      {_red('REVOKED')}")
+    print(f"  Reason:      {args.reason}")
+    print(f"  Audit sealed: {seal_hash} ({total_evals} records)")
+    print()
+    print(f"  This agent's complete history is preserved and cannot be modified.")
+    print(f"  View with: nomotic history {name}")
+    print()
 
 
 def _cmd_renew(args: argparse.Namespace) -> None:
@@ -1169,76 +1197,213 @@ def _cmd_trust(args: argparse.Namespace) -> None:
 
 
 def _cmd_audit(args: argparse.Namespace) -> None:
-    """Show audit records (via API)."""
-    import urllib.request
-    import urllib.error
+    """View audit trail records, summary, or verify hash chain integrity."""
+    from nomotic.audit_store import AuditStore
 
-    base_url = f"http://{args.host}:{args.port}"
+    identifier = args.identifier
 
-    if args.audit_command == "summary":
-        url = f"{base_url}/v1/audit/summary"
-        if args.agent_id:
-            url += f"?agent_id={args.agent_id}"
+    if not identifier and not args.show_all:
+        print("Specify an agent name/ID, or use --all for all agents.", file=sys.stderr)
+        print("  nomotic audit TestBot", file=sys.stderr)
+        print("  nomotic audit TestBot --summary", file=sys.stderr)
+        print("  nomotic audit TestBot --verify", file=sys.stderr)
+        print("  nomotic audit --all", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve agent if provided
+    agent_id = None
+    agent_name = None
+    if identifier:
         try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
-            sys.exit(1)
-        except urllib.error.URLError as exc:
-            print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
-            sys.exit(1)
+            _numeric_id, resolved_name, _cert_id = _resolve_agent(args.base_dir, identifier)
+            agent_id = resolved_name
+            agent_name = resolved_name
+        except SystemExit:
+            # If resolve fails, use the identifier directly (might be a name
+            # for an agent with audit records but no cert)
+            agent_id = identifier
+            agent_name = identifier
 
-        print(f"Audit Trail Summary")
-        print(f"  Total records: {data.get('total_records', 0)}")
-        by_verdict = data.get("by_verdict", {})
-        if by_verdict:
-            print(f"  By verdict:")
-            for v, c in sorted(by_verdict.items()):
-                print(f"    {v:12s} {c}")
-        by_severity = data.get("by_severity", {})
-        if by_severity:
-            print(f"  By severity:")
-            for s, c in sorted(by_severity.items()):
-                print(f"    {s:12s} {c}")
-        alerts = data.get("recent_alerts", [])
-        if alerts:
-            print(f"  Recent alerts ({len(alerts)}):")
-            for a in alerts:
-                print(f"    [{a.get('severity', '?')}] {a.get('context_code', '?')} - {a.get('agent_id', '?')}")
+    if args.verify:
+        _audit_verify(args.base_dir, agent_id)
+    elif args.summary:
+        _audit_summary(args.base_dir, agent_id)
+    else:
+        _audit_records(args.base_dir, agent_id, limit=args.limit, severity=args.severity)
+
+
+def _audit_records(
+    base_dir: Path,
+    agent_id: str | None,
+    limit: int = 20,
+    severity: str | None = None,
+) -> None:
+    """Show recent audit records for an agent."""
+    from nomotic.audit_store import AuditStore
+
+    audit_store = AuditStore(base_dir)
+
+    if agent_id is None:
+        # --all mode: show records across all agents
+        all_agents = audit_store.list_agents()
+        if not all_agents:
+            print("  No audit records found.")
+            print("  Run 'nomotic eval <agent> ...' to generate records.")
+            return
+        print()
+        print(f"  {_bold('Audit Trail: All Agents')}")
+        print()
+        for name in sorted(all_agents):
+            records = audit_store.query(name, limit=limit, severity=severity)
+            if records:
+                print(f"  {_bold(name)} ({len(records)} records)")
+                for r in records[:5]:  # Show top 5 per agent
+                    _print_audit_record(r)
+                if len(records) > 5:
+                    print(f"    ... and {len(records) - 5} more")
+                print()
         return
 
-    # Default: query
-    url = f"{base_url}/v1/audit?"
-    params = []
-    if args.agent_id:
-        params.append(f"agent_id={args.agent_id}")
-    if args.severity:
-        params.append(f"severity={args.severity}")
-    if args.limit:
-        params.append(f"limit={args.limit}")
-    url += "&".join(params)
+    records = audit_store.query(agent_id, limit=limit, severity=severity)
 
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        print(f"API error: {exc.code} {exc.reason}", file=sys.stderr)
-        sys.exit(1)
-    except urllib.error.URLError as exc:
-        print(f"Cannot connect to {base_url}: {exc.reason}", file=sys.stderr)
-        sys.exit(1)
-
-    records = data.get("records", [])
     if not records:
-        print("No audit records found.")
+        print(f"  No audit records found for '{agent_id}'.")
+        print(f"  Run 'nomotic eval {agent_id} ...' to generate records.")
         return
 
-    print(f"Audit Records ({len(records)} shown):")
+    print()
+    print(f"  {_bold(f'Audit Trail: {agent_id}')} (last {len(records)} records)")
+    print()
+
     for r in records:
-        print(f"  [{r.get('severity', '?'):8s}] {r.get('context_code', '?'):25s} agent={r.get('agent_id', '?'):15s} verdict={r.get('verdict', '?')}")
+        _print_audit_record(r)
+
+
+def _print_audit_record(r: "PersistentAuditRecord") -> None:
+    """Print a single audit record."""
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    ts = _dt.fromtimestamp(r.timestamp, tz=_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    verdict_color = _green if r.verdict == "ALLOW" else (_red if r.verdict == "DENY" else _yellow)
+
+    print(f"  {r.record_id}  {ts}  {verdict_color(r.verdict)}")
+    print(f"    Action: {r.action_type} \u2192 {r.action_target}")
+    print(f"    UCS: {r.ucs:.2f}  Tier: {r.tier}  Trust: {r.trust_score:.3f} ({r.trust_trend})")
+    if r.vetoed_by:
+        print(f"    Vetoed by: {', '.join(r.vetoed_by)}")
+    if r.justification:
+        just = r.justification[:120]
+        if len(r.justification) > 120:
+            just += "..."
+        print(f"    Why: {just}")
+    print()
+
+
+def _audit_summary(base_dir: Path, agent_id: str | None) -> None:
+    """Show audit summary for an agent."""
+    from nomotic.audit_store import AuditStore
+
+    audit_store = AuditStore(base_dir)
+
+    if agent_id is None:
+        # --all mode
+        all_agents = audit_store.list_agents()
+        if not all_agents:
+            print("  No audit records found.")
+            return
+        print()
+        print(f"  {_bold('Audit Summary: All Agents')}")
+        print()
+        for name in sorted(all_agents):
+            s = audit_store.summary(name)
+            if s["total"] > 0:
+                print(f"  {_bold(name)}: {s['total']} evaluations, trust {s.get('trust_start', 0.5):.3f} \u2192 {s.get('trust_end', 0.5):.3f}")
+        print()
+        return
+
+    summary = audit_store.summary(agent_id)
+
+    if summary["total"] == 0:
+        print(f"  No audit records found for '{agent_id}'.")
+        return
+
+    total = summary["total"]
+    print()
+    print(f"  {_bold(f'Audit Summary: {agent_id}')}")
+    print()
+    print(f"  Total evaluations: {total}")
+    print()
+
+    print(f"  By verdict:")
+    for v, count in sorted(summary["by_verdict"].items()):
+        pct = count / total * 100
+        color = _green if v == "ALLOW" else (_red if v == "DENY" else _yellow)
+        bar_len = int(count / total * 40)
+        bar = "\u2588" * bar_len
+        print(f"    {color(f'{v:10s}')} {count:5d}  {bar}  {pct:.1f}%")
+    print()
+
+    print(f"  Trust: {summary.get('trust_start', 0.5):.3f} \u2192 {summary.get('trust_end', 0.5):.3f}")
+    print()
+
+
+def _audit_verify(base_dir: Path, agent_id: str | None) -> None:
+    """Verify hash chain integrity for an agent's audit trail."""
+    from nomotic.audit_store import AuditStore
+
+    audit_store = AuditStore(base_dir)
+
+    if agent_id is None:
+        # --all mode
+        all_agents = audit_store.list_agents()
+        if not all_agents:
+            print("  No audit records to verify.")
+            return
+        print()
+        print(f"  {_bold('Audit Chain Verification: All Agents')}")
+        print()
+        _check = "\u2713"
+        _cross = "\u2717"
+        for name in sorted(all_agents):
+            is_valid, count, message = audit_store.verify_chain(name)
+            if count == 0:
+                continue
+            if is_valid:
+                print(f"  {_green(_check)} {name}: {count} records verified")
+            else:
+                print(f"  {_red(_cross)} {name}: {message}")
+        print()
+        return
+
+    is_valid, count, message = audit_store.verify_chain(agent_id)
+
+    print()
+    print(f"  {_bold(f'Audit Chain: {agent_id}')}")
+    print()
+    print(f"  Records: {count}")
+
+    if count == 0:
+        print(f"  No records to verify.")
+        return
+
+    records = audit_store.query_all(agent_id)
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    first_ts = _dt.fromtimestamp(records[0].timestamp, tz=_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    last_ts = _dt.fromtimestamp(records[-1].timestamp, tz=_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"  First:   {first_ts}  ({records[0].action_type} \u2192 {records[0].action_target}, {records[0].verdict})")
+    print(f"  Last:    {last_ts}  ({records[-1].action_type} \u2192 {records[-1].action_target}, {records[-1].verdict})")
+
+    if is_valid:
+        chain_ok = f"\u2713 All {count} records verified \u2014 no tampering detected"
+        print(f"  Chain:   {_green(chain_ok)}")
+        print(f"  Hash:    {records[-1].record_hash}")
+    else:
+        chain_fail = f"\u2717 {message}"
+        print(f"  Chain:   {_red(chain_fail)}")
+    print()
 
 
 def _cmd_provenance(args: argparse.Namespace) -> None:
@@ -1693,6 +1858,41 @@ def _cmd_eval(args: argparse.Namespace) -> None:
     if cert is not None:
         ca.update_trust(cert.certificate_id, new_trust)
 
+    # Persist audit record
+    import time as _time
+    from nomotic.audit_store import AuditStore, PersistentAuditRecord
+
+    audit_store = AuditStore(args.base_dir)
+    previous_hash = audit_store.get_last_hash(agent_id)
+
+    dim_scores = {ds.dimension_name: ds.score for ds in verdict.dimension_scores}
+    vetoed = list(verdict.vetoed_by) if verdict.vetoed_by else []
+
+    record_data = {
+        "record_id": verdict.action_id[:12],
+        "timestamp": _time.time(),
+        "agent_id": agent_id,
+        "action_type": action_type,
+        "action_target": target,
+        "verdict": verdict.verdict.name,
+        "ucs": verdict.ucs,
+        "tier": verdict.tier,
+        "trust_score": new_trust,
+        "trust_delta": delta,
+        "trust_trend": trend.replace("\u2197 ", "").replace("\u2198 ", ""),
+        "severity": "alert" if verdict.verdict.name == "DENY" else "info",
+        "justification": verdict.reasoning or "",
+        "vetoed_by": vetoed,
+        "dimension_scores": dim_scores,
+        "parameters": params,
+        "previous_hash": previous_hash,
+        "record_hash": "",
+    }
+    record_data["record_hash"] = audit_store.compute_hash(record_data, previous_hash)
+
+    audit_record = PersistentAuditRecord(**record_data)
+    audit_store.append(audit_record)
+
 
 def _cmd_simulate(args: argparse.Namespace) -> None:
     """Run a batch simulation of governance evaluations."""
@@ -1737,6 +1937,12 @@ def _cmd_simulate(args: argparse.Namespace) -> None:
     # Generate actions
     actions = generate_actions(agent_id, scenario, total_count=count if count else None)
 
+    # Prepare audit store for persistent records
+    import time as _time
+    from nomotic.audit_store import AuditStore, PersistentAuditRecord
+
+    audit_store = AuditStore(args.base_dir)
+
     # Run simulation
     print()
     print(f"  {_bold(f'Simulating: {scenario.description}')}")
@@ -1745,16 +1951,55 @@ def _cmd_simulate(args: argparse.Namespace) -> None:
     trust_history: list[float] = [initial_trust]
     results = {"ALLOW": 0, "DENY": 0, "ESCALATE": 0, "MODIFY": 0}
     current_phase = ""
+    previous_hash = audit_store.get_last_hash(agent_id)
 
     for i, (action, phase_desc) in enumerate(actions):
         if phase_desc != current_phase:
             current_phase = phase_desc
             print(f"  {_cyan(f'Phase: {phase_desc}')}")
 
+        prev_trust = runtime.get_trust_profile(agent_id).overall_trust
         ctx = GovCtx(agent_id=agent_id, trust_profile=runtime.get_trust_profile(agent_id))
         verdict = runtime.evaluate(action, ctx)
         results[verdict.verdict.name] = results.get(verdict.verdict.name, 0) + 1
-        trust_history.append(runtime.get_trust_profile(agent_id).overall_trust)
+        new_trust = runtime.get_trust_profile(agent_id).overall_trust
+        trust_history.append(new_trust)
+
+        # Persist audit record
+        delta = new_trust - prev_trust
+        trend = "stable"
+        if delta > 0.001:
+            trend = "rising"
+        elif delta < -0.001:
+            trend = "falling"
+
+        dim_scores = {ds.dimension_name: ds.score for ds in verdict.dimension_scores}
+        vetoed = list(verdict.vetoed_by) if verdict.vetoed_by else []
+
+        record_data = {
+            "record_id": verdict.action_id[:12],
+            "timestamp": _time.time(),
+            "agent_id": agent_id,
+            "action_type": action.action_type,
+            "action_target": action.target,
+            "verdict": verdict.verdict.name,
+            "ucs": verdict.ucs,
+            "tier": verdict.tier,
+            "trust_score": new_trust,
+            "trust_delta": delta,
+            "trust_trend": trend,
+            "severity": "alert" if verdict.verdict.name == "DENY" else "info",
+            "justification": verdict.reasoning or "",
+            "vetoed_by": vetoed,
+            "dimension_scores": dim_scores,
+            "parameters": dict(action.parameters) if action.parameters else {},
+            "previous_hash": previous_hash,
+            "record_hash": "",
+        }
+        record_data["record_hash"] = audit_store.compute_hash(record_data, previous_hash)
+        audit_record = PersistentAuditRecord(**record_data)
+        audit_store.append(audit_record)
+        previous_hash = record_data["record_hash"]
 
         # Progress indicator
         total = len(actions)
@@ -1928,13 +2173,20 @@ def _cmd_history(args: argparse.Namespace) -> None:
         except (json.JSONDecodeError, KeyError):
             pass
 
+    # Load audit store data
+    from nomotic.audit_store import AuditStore
+    audit_store = AuditStore(args.base_dir)
+    audit_summary = audit_store.summary(name)
+    is_valid, chain_count, chain_msg = audit_store.verify_chain(name)
+
     print()
     print(f"History: {name} (ID: {numeric_id})")
 
     if status == "REVOKED" and revoked_at:
-        print(f"  Status: REVOKED ({revoked_at[:10]})")
+        print(f"  Status: {_red('REVOKED')} ({revoked_at[:10]})")
     else:
-        print(f"  Status: {status}")
+        status_color = _green if status == "ACTIVE" else (_yellow if status == "SUSPENDED" else _dim)
+        print(f"  Status: {status_color(status)}")
     print(f"  {'─' * 37}")
     print()
 
@@ -1982,6 +2234,29 @@ def _cmd_history(args: argparse.Namespace) -> None:
         print("  Summary:")
         print(f"    Behavioral age:     {age}")
         print(f"    Current trust:      {trust:.3f}")
+
+    # Persistent audit trail info
+    if audit_summary.get("total", 0) > 0:
+        total = audit_summary["total"]
+        print()
+        print("  Persistent Audit Trail:")
+        print(f"    Records:   {total}")
+        if audit_summary.get("by_verdict"):
+            verdicts = []
+            for v, c in sorted(audit_summary["by_verdict"].items()):
+                verdicts.append(f"{c} {v}")
+            print(f"    Verdicts:  {', '.join(verdicts)}")
+        trust_start = audit_summary.get("trust_start", 0.5)
+        trust_end = audit_summary.get("trust_end", 0.5)
+        print(f"    Trust:     {trust_start:.3f} \u2192 {trust_end:.3f}")
+
+        if chain_count > 0:
+            if is_valid:
+                _ok = "\u2713 verified"
+                print(f"    Chain:     {_green(_ok)} ({chain_count} records)")
+            else:
+                _fail = f"\u2717 {chain_msg}"
+                print(f"    Chain:     {_red(_fail)}")
 
     print()
 
@@ -2882,24 +3157,14 @@ def build_parser() -> argparse.ArgumentParser:
     alerts_parser.add_argument("--port", type=int, default=8420, help="API server port (default: 8420)")
 
     # ── audit ────────────────────────────────────────────────────
-    audit_parser = sub.add_parser("audit", help="Show audit trail records")
-    audit_sub = audit_parser.add_subparsers(dest="audit_command")
-    audit_query = audit_sub.add_parser("query", help="Query audit records")
-    audit_query.add_argument("--agent-id", default=None, help="Filter by agent ID")
-    audit_query.add_argument("--severity", default=None, help="Filter by severity")
-    audit_query.add_argument("--limit", type=int, default=20, help="Max records to show")
-    audit_query.add_argument("--host", default="127.0.0.1", help="API server host")
-    audit_query.add_argument("--port", type=int, default=8420, help="API server port")
-    audit_summary = audit_sub.add_parser("summary", help="Show audit trail summary")
-    audit_summary.add_argument("--agent-id", default=None, help="Filter by agent ID")
-    audit_summary.add_argument("--host", default="127.0.0.1", help="API server host")
-    audit_summary.add_argument("--port", type=int, default=8420, help="API server port")
-    # Default: query
-    audit_parser.add_argument("--agent-id", default=None, help="Filter by agent ID")
-    audit_parser.add_argument("--severity", default=None, help="Filter by severity")
+    audit_parser = sub.add_parser("audit", help="View audit trail and verify integrity")
+    audit_parser.add_argument("identifier", nargs="?", default=None,
+                              help="Agent name, ID, or certificate ID")
+    audit_parser.add_argument("--summary", action="store_true", help="Show summary instead of records")
+    audit_parser.add_argument("--verify", action="store_true", help="Verify hash chain integrity")
+    audit_parser.add_argument("--all", action="store_true", dest="show_all", help="Show all agents (no filter)")
     audit_parser.add_argument("--limit", type=int, default=20, help="Max records to show")
-    audit_parser.add_argument("--host", default="127.0.0.1", help="API server host")
-    audit_parser.add_argument("--port", type=int, default=8420, help="API server port")
+    audit_parser.add_argument("--severity", default=None, help="Filter by severity")
 
     # ── provenance ──────────────────────────────────────────────
     prov_parser = sub.add_parser("provenance", help="Show configuration provenance")
