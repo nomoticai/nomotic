@@ -11,15 +11,15 @@ from nomotic.cli import main
 
 class TestHelloCommand:
     def test_hello_runs_without_error(self, capsys):
-        """The hello command should run and produce output."""
+        """The hello command should redirect to the tutorial."""
         # Run the hello command via the CLI main()
         try:
             main(["hello"])
         except SystemExit:
             pass
         captured = capsys.readouterr()
-        assert "Nomotic Governance Demo" in captured.out
-        assert "Trust trajectory" in captured.out
+        assert "Starting the Nomotic tutorial..." in captured.out
+        assert "Tutorial complete" in captured.out
 
     def test_hello_does_not_create_files(self, tmp_path, monkeypatch):
         """The hello command should not create any files in ~/.nomotic/."""

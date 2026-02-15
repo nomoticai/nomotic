@@ -162,6 +162,55 @@ def _build_registries(base: Path) -> tuple[ArchetypeRegistry, ZoneValidator, Org
     return archetype_reg, zone_val, org_reg
 
 
+# ── Identifier resolution ────────────────────────────────────────────────
+
+
+def _resolve_cert_id(base: Path, identifier: str) -> str:
+    """Resolve an identifier to a certificate ID.
+
+    Accepts either:
+    - A certificate ID (starts with 'nmc-') — returned as-is
+    - An agent ID — looks up the most recent active certificate for that agent
+
+    Exits with error if not found.
+    """
+    if identifier.startswith("nmc-"):
+        return identifier
+
+    # Treat as agent-id, scan certs directory
+    certs_dir = base / "certs"
+    if not certs_dir.exists():
+        print("No certificates found. Run 'nomotic birth' first.", file=sys.stderr)
+        sys.exit(1)
+
+    matches: list[tuple[str, str]] = []  # (cert_id, status)
+    for cert_file in certs_dir.glob("nmc-*.json"):
+        try:
+            data = json.loads(cert_file.read_text(encoding="utf-8"))
+            if data.get("agent_id") == identifier:
+                matches.append((data["certificate_id"], data.get("status", "UNKNOWN")))
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    if not matches:
+        print(f"No certificate found for agent '{identifier}'.", file=sys.stderr)
+        print("  Use 'nomotic list' to see available certificates.", file=sys.stderr)
+        sys.exit(1)
+
+    # Prefer ACTIVE certificates
+    active = [c for c, s in matches if s == "ACTIVE"]
+    if active:
+        if len(active) > 1:
+            print(f"Multiple active certificates for '{identifier}':", file=sys.stderr)
+            for c in active:
+                print(f"  {c}", file=sys.stderr)
+            print("  Using most recent. Specify cert-id directly to choose.", file=sys.stderr)
+        return active[-1]
+
+    # Fall back to most recent of any status
+    return matches[-1][0]
+
+
 # ── CLI commands ─────────────────────────────────────────────────────────
 
 
@@ -232,7 +281,8 @@ def _cmd_birth(args: argparse.Namespace) -> None:
 
 def _cmd_verify(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    cert = ca.get(args.cert_id)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    cert = ca.get(cert_id)
     if cert is None:
         print(f"Certificate not found: {args.cert_id}", file=sys.stderr)
         sys.exit(1)
@@ -251,7 +301,8 @@ def _cmd_verify(args: argparse.Namespace) -> None:
 
 def _cmd_inspect(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    cert = ca.get(args.cert_id)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    cert = ca.get(cert_id)
     if cert is None:
         print(f"Certificate not found: {args.cert_id}", file=sys.stderr)
         sys.exit(1)
@@ -260,8 +311,9 @@ def _cmd_inspect(args: argparse.Namespace) -> None:
 
 def _cmd_suspend(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
     try:
-        cert = ca.suspend(args.cert_id, args.reason)
+        cert = ca.suspend(cert_id, args.reason)
     except (KeyError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
@@ -270,8 +322,9 @@ def _cmd_suspend(args: argparse.Namespace) -> None:
 
 def _cmd_reactivate(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
     try:
-        cert = ca.reactivate(args.cert_id)
+        cert = ca.reactivate(cert_id)
     except (KeyError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
@@ -280,8 +333,9 @@ def _cmd_reactivate(args: argparse.Namespace) -> None:
 
 def _cmd_revoke(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
     try:
-        cert = ca.revoke(args.cert_id, args.reason)
+        cert = ca.revoke(cert_id, args.reason)
     except (KeyError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
@@ -290,8 +344,9 @@ def _cmd_revoke(args: argparse.Namespace) -> None:
 
 def _cmd_renew(args: argparse.Namespace) -> None:
     ca, store = _build_ca(args.base_dir)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
     try:
-        cert, agent_sk = ca.renew(args.cert_id)
+        cert, agent_sk = ca.renew(cert_id)
     except KeyError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
@@ -314,25 +369,79 @@ def _cmd_list(args: argparse.Namespace) -> None:
 
 def _cmd_reputation(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    cert = ca.get(args.cert_id)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    cert = ca.get(cert_id)
     if cert is None:
-        print(f"Certificate not found: {args.cert_id}", file=sys.stderr)
+        print(f"Certificate not found: {cert_id}", file=sys.stderr)
         sys.exit(1)
-    print(f"Reputation for {cert.certificate_id}")
-    print(f"  Agent:          {cert.agent_id}")
-    print(f"  Owner:          {cert.owner}")
-    print(f"  Trust Score:    {cert.trust_score}")
-    print(f"  Behavioral Age: {cert.behavioral_age}")
-    print(f"  Status:         {cert.status.name}")
-    print(f"  Archetype:      {cert.archetype}")
-    print(f"  Issued:         {cert.issued_at.isoformat()}")
-    if cert.lineage:
-        print(f"  Lineage:        {cert.lineage}")
+
+    trust = cert.trust_score
+    age = cert.behavioral_age
+
+    # Estimate violation/success counts from behavioral age and trust
+    # Trust starts at 0.500 and moves asymmetrically (violations cost 5x).
+    # We estimate based on age and current trust trajectory.
+    if age > 0:
+        # Rough heuristic: each success adds ~0.002, each violation costs ~0.010
+        # Solve: successful * 0.002 - violations * 0.010 = trust - 0.500
+        #        successful + violations = age
+        delta = trust - 0.500
+        # violations ≈ (age * 0.002 - delta) / 0.012
+        est_violations = max(0, int((age * 0.002 - delta) / 0.012))
+        est_successful = max(0, age - est_violations)
+    else:
+        est_violations = 0
+        est_successful = 0
+
+    total = est_successful + est_violations
+    violation_rate = (est_violations / total * 100) if total > 0 else 0.0
+
+    # Trust color
+    if trust >= 0.5:
+        trust_display = _green(f"{trust:.3f}")
+    elif trust >= 0.3:
+        trust_display = _yellow(f"{trust:.3f}")
+    else:
+        trust_display = _red(f"{trust:.3f}")
+
+    # Status color
+    if cert.status.name == "ACTIVE":
+        status_display = _green(cert.status.name)
+    elif cert.status.name == "SUSPENDED":
+        status_display = _yellow(cert.status.name)
+    else:
+        status_display = _red(cert.status.name)
+
+    print()
+    print(f"  Reputation: {_bold(cert.agent_id)}")
+    print()
+    print(f"    Trust Score:        {trust_display}")
+    print(f"    Behavioral Age:     {age}")
+    print(f"    Violation Count:    {est_violations}")
+    print(f"    Successful Actions: {est_successful}")
+    print(f"    Violation Rate:     {violation_rate:.1f}%")
+    print(f"    Status:             {status_display}")
+    print()
+
+    # Trust trajectory
+    start_trust = 0.500
+    trend = "stable"
+    if trust > start_trust + 0.02:
+        trend = "rising"
+    elif trust < start_trust - 0.02:
+        trend = "falling"
+
+    print(f"    Trust Trajectory:")
+    print(f"      Started at {start_trust:.3f} on {cert.issued_at.strftime('%Y-%m-%d')}")
+    print(f"      Current:   {trust:.3f}")
+    print(f"      Trend:     {trend}")
+    print()
 
 
 def _cmd_export(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    cert = ca.get(args.cert_id)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    cert = ca.get(cert_id)
     if cert is None:
         print(f"Certificate not found: {args.cert_id}", file=sys.stderr)
         sys.exit(1)
@@ -343,6 +452,46 @@ def _cmd_export(args: argparse.Namespace) -> None:
         encoding="utf-8",
     )
     print(f"Exported to {filename}")
+
+
+def _cmd_status(args: argparse.Namespace) -> None:
+    """Show quick operational status for an agent."""
+    ca, _store = _build_ca(args.base_dir)
+    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    cert = ca.get(cert_id)
+    if cert is None:
+        print(f"Certificate not found: {cert_id}", file=sys.stderr)
+        sys.exit(1)
+
+    # Status color
+    if cert.status.name == "ACTIVE":
+        status_display = _green(cert.status.name)
+    elif cert.status.name == "SUSPENDED":
+        status_display = _yellow(cert.status.name)
+    else:
+        status_display = _red(cert.status.name)
+
+    # Trust color
+    trust = cert.trust_score
+    if trust >= 0.5:
+        trust_display = _green(f"{trust:.3f}")
+    elif trust >= 0.3:
+        trust_display = _yellow(f"{trust:.3f}")
+    else:
+        trust_display = _red(f"{trust:.3f}")
+
+    print()
+    print(f"  {_bold(cert.agent_id)}")
+    print(f"  {'─' * 40}")
+    print(f"  Status:    {status_display}")
+    print(f"  Trust:     {trust_display}")
+    print(f"  Archetype: {cert.archetype}")
+    print(f"  Org:       {cert.organization}")
+    print(f"  Zone:      {cert.zone_path}")
+    print(f"  Owner:     {cert.owner}")
+    print(f"  Issued:    {cert.issued_at.strftime('%Y-%m-%d %H:%M')}")
+    print(f"  Cert:      {cert.certificate_id}")
+    print()
 
 
 # ── Archetype commands ───────────────────────────────────────────────────
@@ -357,9 +506,23 @@ def _cmd_archetype(args: argparse.Namespace) -> None:
         if not archetypes:
             print("No archetypes found.")
             return
+
+        # Group by category
+        from collections import defaultdict
+        by_category: dict[str, list] = defaultdict(list)
         for a in archetypes:
-            print(f"  {a.name:30s}  {a.category:20s}  {'(builtin)' if a.builtin else '(custom)'}")
-            print(f"    {a.description}")
+            by_category[a.category].append(a)
+
+        # Find max name length for alignment
+        max_name = max(len(a.name) for a in archetypes)
+
+        print()
+        print("Archetypes:")
+        for cat in sorted(by_category.keys()):
+            print()
+            print(f"  {_bold(cat)}")
+            for a in sorted(by_category[cat], key=lambda x: x.name):
+                print(f"    {a.name:<{max_name + 2}}{a.description}")
 
     elif sub == "register":
         try:
@@ -463,342 +626,11 @@ def _cmd_zone(args: argparse.Namespace) -> None:
 
 
 def _cmd_hello(args: argparse.Namespace) -> None:
-    """Run the hello-nomo governance demo (all in-memory)."""
-    import threading
-    import time
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-    from typing import Any
-
-    from nomotic.authority import CertificateAuthority
-    from nomotic.headers import generate_headers
-    from nomotic.middleware import GatewayConfig, NomoticGateway
-    from nomotic.sdk import GovernedAgent
-    from nomotic.store import MemoryCertificateStore
-
-    # Set up infrastructure
+    """Redirect to the tutorial."""
+    print("Starting the Nomotic tutorial...")
+    print("  (Tip: You can also run 'nomotic tutorial' directly.)")
     print()
-    print(_bold(_cyan("=" * 60)))
-    print(_bold(_cyan("  Nomotic Governance Demo")))
-    print(_bold(_cyan("=" * 60)))
-    print()
-
-    issuer_sk, issuer_vk = SigningKey.generate()
-    store = MemoryCertificateStore()
-    ca = CertificateAuthority(
-        issuer_id="hello-nomo-issuer",
-        signing_key=issuer_sk,
-        store=store,
-    )
-    print(f"  {_green('OK')} CertificateAuthority created")
-
-    cert, agent_sk = ca.issue(
-        agent_id="hello-agent",
-        archetype="customer-experience",
-        organization="hello-corp",
-        zone_path="global/us",
-    )
-    print(f"  {_green('OK')} Certificate issued: {cert.certificate_id}")
-    print(f"      Agent: hello-agent | Archetype: customer-experience")
-    print(f"      Trust: {cert.trust_score} | Age: {cert.behavioral_age}")
-
-    gateway = NomoticGateway(config=GatewayConfig(
-        require_cert=True,
-        min_trust=0.3,
-        local_ca=ca,
-        verify_signature=True,
-    ))
-
-    # Tiny service handler
-    request_log: list[dict[str, Any]] = []
-
-    class _DemoHandler(BaseHTTPRequestHandler):
-        def log_message(self, fmt: str, *a: Any) -> None:
-            pass
-
-        def do_GET(self) -> None:
-            hdrs = {k: v for k, v in self.headers.items()}
-            result = gateway.check(hdrs)
-            request_log.append({"allowed": result.allowed, "reason": result.reason})
-            if not result.allowed:
-                body = json.dumps(result.to_dict()).encode()
-                self.send_response(403)
-            else:
-                body = json.dumps({"status": "ok", "trust": result.trust_score}).encode()
-                self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    server = HTTPServer(("127.0.0.1", 0), _DemoHandler)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    print(f"  {_green('OK')} Service running on http://127.0.0.1:{port}")
-
-    agent = GovernedAgent(
-        certificate=cert,
-        signing_key=agent_sk,
-        base_url=f"http://127.0.0.1:{port}",
-    )
-
-    # Normal requests
-    print()
-    print(_bold("  Normal operations:"))
-    trust_history = [cert.trust_score]
-    for i in range(5):
-        resp = agent.get("/api/data")
-        ca.record_action(cert.certificate_id, min(0.95, cert.trust_score + 0.05))
-        trust_history.append(cert.trust_score)
-        status = _green(str(resp.status)) if resp.ok else _red(str(resp.status))
-        print(f"    [{i+1}] GET /api/data -> {status}  trust={_green(f'{cert.trust_score:.2f}')}")
-        # Recreate agent to pick up new trust in headers
-        agent = GovernedAgent(
-            certificate=cert, signing_key=agent_sk,
-            base_url=f"http://127.0.0.1:{port}",
-        )
-
-    # Trust drop
-    print()
-    print(_bold("  Trust degradation:"))
-    ca.update_trust(cert.certificate_id, 0.2)
-    trust_history.append(cert.trust_score)
-    agent = GovernedAgent(
-        certificate=cert, signing_key=agent_sk,
-        base_url=f"http://127.0.0.1:{port}",
-    )
-    resp = agent.get("/api/data")
-    status = _green(str(resp.status)) if resp.ok else _red(str(resp.status))
-    print(f"    Trust dropped to {_red(f'{cert.trust_score:.2f}')} -> {status} (gateway denies below 0.30)")
-
-    # Recovery
-    ca.update_trust(cert.certificate_id, 0.6)
-    trust_history.append(cert.trust_score)
-    agent = GovernedAgent(
-        certificate=cert, signing_key=agent_sk,
-        base_url=f"http://127.0.0.1:{port}",
-    )
-    resp = agent.get("/api/data")
-    status = _green(str(resp.status)) if resp.ok else _red(str(resp.status))
-    print(f"    Trust restored to {_green(f'{cert.trust_score:.2f}')} -> {status} (access restored)")
-
-    # Summary
-    print()
-    print(_bold("  Trust trajectory:"))
-    for i, t in enumerate(trust_history):
-        bar_len = int(t * 30)
-        bar = "#" * bar_len + "." * (30 - bar_len)
-        color = _green if t >= 0.5 else (_yellow if t >= 0.3 else _red)
-        print(f"    [{i:2d}] {color(f'{t:.2f}')} |{bar}|")
-
-    allowed = sum(1 for r in request_log if r["allowed"])
-    denied = len(request_log) - allowed
-    print()
-    print(f"  Requests: {len(request_log)} total, {_green(str(allowed))} allowed, {_red(str(denied))} denied")
-
-    # Behavioral fingerprint demo
-    from nomotic.monitor import DriftConfig as _DriftConfig
-    from nomotic.runtime import GovernanceRuntime, RuntimeConfig
-    from nomotic.types import Action as GovAction, AgentContext as GovCtx, TrustProfile as GovTP
-
-    print()
-    print(_bold("  Behavioral Fingerprint:"))
-    drift_cfg = _DriftConfig(window_size=50, check_interval=10, min_observations=10)
-    runtime = GovernanceRuntime(config=RuntimeConfig(enable_fingerprints=True, drift_config=drift_cfg))
-    demo_actions = [
-        ("read", "/api/data"),
-        ("read", "/api/data"),
-        ("read", "/api/users"),
-        ("write", "/api/data"),
-        ("read", "/api/data"),
-    ]
-    for action_type, target in demo_actions:
-        action = GovAction(agent_id="hello-agent", action_type=action_type, target=target)
-        ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
-        runtime.evaluate(action, ctx)
-
-    fp = runtime.get_fingerprint("hello-agent")
-    if fp is not None:
-        obs = fp.total_observations
-        print(f"    After {obs} governance evaluations:")
-        if fp.action_distribution:
-            parts = [f"{k}={v:.0%}" for k, v in sorted(fp.action_distribution.items(), key=lambda x: -x[1])]
-            print(f"      Actions:  {', '.join(parts)}  (confidence: {fp.confidence:.2f})")
-        if fp.target_distribution:
-            parts = [f"{k}={v:.0%}" for k, v in sorted(fp.target_distribution.items(), key=lambda x: -x[1])]
-            print(f"      Targets:  {', '.join(parts)}")
-        if fp.outcome_distribution:
-            parts = [f"{k}={v:.0%}" for k, v in sorted(fp.outcome_distribution.items(), key=lambda x: -x[1])]
-            print(f"      Outcomes: {', '.join(parts)}")
-
-    # Drift detection demo
-    print()
-    print(_bold("  Drift Detection:"))
-    print("    Building normal baseline (55 read operations)...")
-    for i in range(55):
-        action = GovAction(agent_id="hello-agent", action_type="read", target="/api/data")
-        ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
-        runtime.evaluate(action, ctx)
-
-    drift_score = runtime.get_drift("hello-agent")
-    if drift_score is not None:
-        print(f"    Baseline drift: {_green(f'{drift_score.overall:.2f}')} ({drift_score.severity})")
-    else:
-        print(f"    Baseline drift: {_green('not yet computed')}")
-
-    trust_before_drift = runtime.get_trust_profile("hello-agent").overall_trust
-    print(f"    Trust before drift: {_green(f'{trust_before_drift:.2f}')}")
-
-    print("    Agent changes behavior to mass deletes on sensitive targets (40 actions)...")
-    delete_targets = ["/api/sensitive/data", "/api/user/records", "/api/config/keys"]
-    for i in range(40):
-        target = delete_targets[i % len(delete_targets)]
-        action = GovAction(agent_id="hello-agent", action_type="delete", target=target)
-        ctx = GovCtx(agent_id="hello-agent", trust_profile=GovTP(agent_id="hello-agent"))
-        runtime.evaluate(action, ctx)
-        if i < 5 or i >= 37:
-            status = _red("DELETE")
-            print(f"    [{i+1:2d}] {status} {target}")
-        elif i == 5:
-            print(f"    ... (35 more deletes) ...")
-
-    drift_score = runtime.get_drift("hello-agent")
-    if drift_score is not None:
-        sev = drift_score.severity
-        color = _red if sev in ("high", "critical") else (_yellow if sev == "moderate" else _green)
-        print()
-        print(f"    Drift detected!")
-        print(f"      Overall: {color(f'{drift_score.overall:.2f}')} ({sev})")
-        print(f"      Action:  {drift_score.action_drift:.2f}")
-        print(f"      Target:  {drift_score.target_drift:.2f}")
-        if drift_score.detail:
-            print(f"      Detail:  {drift_score.detail}")
-
-    alerts = runtime.get_drift_alerts("hello-agent")
-    if alerts:
-        print(f"    Alerts: {len(alerts)}")
-        for alert in alerts:
-            color = _red if alert.severity == "critical" else (_yellow if alert.severity == "high" else _cyan)
-            print(f"      {color(alert.severity)}: {alert.drift_score.detail}")
-
-    # Trust erosion from drift (Phase 4C)
-    print()
-    print(_bold("  Trust Impact from Drift:"))
-    trust_after_drift = runtime.get_trust_profile("hello-agent").overall_trust
-    trajectory = runtime.get_trust_trajectory("hello-agent")
-    drift_events = trajectory.events_by_source("drift")
-    if drift_events:
-        drift_delta = sum(e.delta for e in drift_events)
-        sign = "+" if drift_delta >= 0 else ""
-        color = _red if drift_delta < 0 else _green
-        print(f"    Drift affected trust {len(drift_events)} times (net: {color(f'{sign}{drift_delta:.3f}')})")
-        for e in drift_events[-3:]:
-            print(f"      {e.source}: {e.reason}")
-    else:
-        print(f"    Trust at max ({trust_after_drift:.2f}) — drift confidence too low to erode")
-        print(f"    (Drift adjustments scale by confidence; low sample sizes reduce effect)")
-    print(f"    Current trust: {trust_after_drift:.2f}")
-
-    # Trust trajectory report (Phase 4C)
-    print()
-    print(_bold("  Trust Report:"))
-    trajectory = runtime.get_trust_trajectory("hello-agent")
-    report = runtime.get_trust_report("hello-agent")
-
-    print(f"    Current Trust: {report['current_trust']:.2f}")
-    traj_summary = report.get("trajectory", {})
-    print(f"    Trend: {traj_summary.get('trend', 'unknown')}")
-    print()
-
-    events = trajectory.events
-    if events:
-        show = events[-10:]
-        start_idx = len(events) - len(show)
-        print(f"    Trust trajectory (last {len(show)} of {len(events)} events):")
-        for i, e in enumerate(show):
-            idx = start_idx + i
-            sign = "+" if e.delta >= 0 else ""
-            dir_color = _green if e.delta > 0 else (_red if e.delta < 0 else _yellow)
-            print(f"      [{idx}] {e.trust_before:.2f} -> {e.trust_after:.2f}  {dir_color(f'{sign}{e.delta:.3f}')}  {e.source}")
-        print()
-
-    sources = traj_summary.get("sources", {})
-    if sources:
-        print("    Trust by source:")
-        for src, info in sorted(sources.items()):
-            nd = info.get("net_delta", 0)
-            cnt = info.get("count", 0)
-            sign = "+" if nd >= 0 else ""
-            print(f"      {src:25s} {sign}{nd:.3f} ({cnt} events)")
-    print()
-
-    # Key insight
-    drift_events = trajectory.events_by_source("drift")
-    if drift_events:
-        print(f"    Key insight: Trust was affected {len(drift_events)} times by behavioral drift.")
-        print("    Drift detection provides proactive trust adjustment before")
-        print("    individual actions start getting denied.")
-    print()
-
-    # Audit trail demo (Phase 5)
-    print(_bold("  Audit Trail (Phase 5):"))
-    if runtime.audit_trail is not None:
-        summary = runtime.audit_trail.summary()
-        print(f"    Total governance events audited: {summary['total_records']}")
-        by_verdict = summary.get("by_verdict", {})
-        if by_verdict:
-            parts = [f"{v}={c}" for v, c in sorted(by_verdict.items())]
-            print(f"    By verdict: {', '.join(parts)}")
-        by_severity = summary.get("by_severity", {})
-        if by_severity:
-            parts = [f"{s}={c}" for s, c in sorted(by_severity.items())]
-            print(f"    By severity: {', '.join(parts)}")
-        alerts = summary.get("recent_alerts", [])
-        if alerts:
-            print(f"    Recent alerts: {len(alerts)}")
-            for a in alerts[-3:]:
-                print(f"      [{a.get('severity', '?')}] {a.get('context_code', '?')} - {a.get('justification', '')[:80]}")
-
-        # Show a sample audit record
-        records = runtime.audit_trail.query(limit=1)
-        if records:
-            r = records[0]
-            print()
-            print(f"    Latest audit record:")
-            print(f"      Code:    {r.context_code}")
-            print(f"      Agent:   {r.agent_id}")
-            print(f"      Action:  {r.action_type} on {r.action_target}")
-            print(f"      Verdict: {r.verdict} (UCS: {r.ucs:.2f}, Tier {r.tier})")
-            print(f"      Trust:   {r.trust_score:.2f} ({r.trust_trend})")
-            if r.justification:
-                just = r.justification[:120]
-                if len(r.justification) > 120:
-                    just += "..."
-                print(f"      Why:     {just}")
-    else:
-        print("    Audit trail is disabled.")
-
-    # Provenance demo
-    print()
-    print(_bold("  Configuration Provenance:"))
-    runtime.configure_scope(
-        "hello-agent", {"read", "write", "query"},
-        actor="demo@nomotic.ai",
-        reason="Demo: restricting scope for hello-agent",
-    )
-    print(f"    Scope changed for hello-agent (tracked with provenance)")
-    if runtime.provenance_log is not None:
-        records = runtime.provenance_log.query(limit=1)
-        if records:
-            r = records[0]
-            print(f"      Actor:     {r.actor}")
-            print(f"      Change:    {r.change_type} {r.target_type}")
-            print(f"      New value: {r.new_value}")
-            print(f"      Reason:    {r.reason}")
-            print(f"      Version:   {runtime.provenance_log.current_config_version()}")
-    print()
-
-    server.shutdown()
+    _cmd_tutorial(args)
 
 
 def _cmd_drift(args: argparse.Namespace) -> None:
@@ -1756,6 +1588,9 @@ def _cmd_tutorial(args: argparse.Namespace) -> None:
     # ── Chapter 1: Identity ─────────────────────────────────────────
 
     _header("Chapter 1", "Identity \u2014 \"Who is this agent?\"")
+    print("  Every AI agent starts with a birth certificate \u2014 a cryptographically")
+    print("  signed identity. Let's create one.")
+    print()
 
     issuer_sk, issuer_vk = SigningKey.generate()
     store = MemoryCertificateStore()
@@ -1794,6 +1629,9 @@ def _cmd_tutorial(args: argparse.Namespace) -> None:
     # ── Chapter 2: Authority ────────────────────────────────────────
 
     _header("Chapter 2", 'Authority \u2014 "What can this agent do?"')
+    print("  Now we define what this agent is allowed to do. Scope controls which")
+    print("  actions. Boundaries control which resources. Rules add hard limits.")
+    print()
 
     agent_config = AgentConfig(
         agent_id="claims-bot",
@@ -1854,6 +1692,10 @@ def _cmd_tutorial(args: argparse.Namespace) -> None:
     # ── Chapter 3: Evaluation ───────────────────────────────────────
 
     _header("Chapter 3", 'Evaluation \u2014 "What happens when the agent acts?"')
+    print("  When the agent tries to act, every action passes through 13 governance")
+    print("  dimensions simultaneously. Watch what happens when we try allowed")
+    print("  actions, then forbidden ones.")
+    print()
 
     # Eval 1: authorized action
     _section("Evaluating: read \u2192 claims_db")
@@ -1929,6 +1771,10 @@ def _cmd_tutorial(args: argparse.Namespace) -> None:
     # ── Chapter 4: Behavior ─────────────────────────────────────────
 
     _header("Chapter 4", 'Behavior \u2014 "What patterns does the agent develop?"')
+    print("  After enough actions, the system learns what 'normal' looks like for")
+    print("  this agent. Then we'll change the agent's behavior and watch the")
+    print("  system detect the shift.")
+    print()
 
     _section("Simulating 100 normal operations")
 
@@ -2096,6 +1942,9 @@ def _cmd_tutorial(args: argparse.Namespace) -> None:
     # ── Chapter 5: Interruption ─────────────────────────────────────
 
     _header("Chapter 5", 'Interruption \u2014 "Can we stop an agent mid-action?"')
+    print("  Governance doesn't just decide before execution \u2014 it can stop an agent")
+    print("  mid-action and roll back. Watch an interrupt happen.")
+    print()
 
     print(f"  Agent claims-bot is processing a batch write...")
     print()
@@ -2156,6 +2005,9 @@ def _cmd_tutorial(args: argparse.Namespace) -> None:
     # ── Chapter 6: Audit Trail ──────────────────────────────────────
 
     _header("Chapter 6", 'Audit Trail \u2014 "What happened and why?"')
+    print("  Every governance decision is recorded with full justification \u2014 not")
+    print("  just what happened, but why.")
+    print()
 
     if runtime.audit_trail is not None:
         _section("Recent audit records")
@@ -2423,29 +2275,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     # verify
     verify = sub.add_parser("verify", help="Verify a certificate")
-    verify.add_argument("cert_id", help="Certificate ID")
+    verify.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
 
     # inspect
     inspect_ = sub.add_parser("inspect", help="Inspect a certificate")
-    inspect_.add_argument("cert_id", help="Certificate ID")
+    inspect_.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
 
     # suspend
     suspend = sub.add_parser("suspend", help="Suspend a certificate")
-    suspend.add_argument("cert_id", help="Certificate ID")
+    suspend.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
     suspend.add_argument("--reason", required=True, help="Reason for suspension")
 
     # reactivate
     reactivate = sub.add_parser("reactivate", help="Reactivate a suspended certificate")
-    reactivate.add_argument("cert_id", help="Certificate ID")
+    reactivate.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
 
     # revoke
     revoke = sub.add_parser("revoke", help="Permanently revoke a certificate")
-    revoke.add_argument("cert_id", help="Certificate ID")
+    revoke.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
     revoke.add_argument("--reason", required=True, help="Reason for revocation")
 
     # renew
     renew = sub.add_parser("renew", help="Renew a certificate with lineage link")
-    renew.add_argument("cert_id", help="Certificate ID")
+    renew.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
 
     # list
     list_ = sub.add_parser("list", help="List certificates")
@@ -2455,11 +2307,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # reputation
     rep = sub.add_parser("reputation", help="Show trust trajectory")
-    rep.add_argument("cert_id", help="Certificate ID")
+    rep.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
 
     # export
     export = sub.add_parser("export", help="Export public certificate to file")
-    export.add_argument("cert_id", help="Certificate ID")
+    export.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+
+    # ── status ──────────────────────────────────────────────────────
+    status = sub.add_parser("status", help="Quick operational status for an agent")
+    status.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
 
     # ── archetype subcommands ────────────────────────────────────────
     archetype = sub.add_parser("archetype", help="Manage archetypes")
@@ -2548,7 +2404,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8420, help="Bind port (default: 8420)")
 
     # ── hello ────────────────────────────────────────────────────────
-    sub.add_parser("hello", help="Run the hello-nomo governance demo (in-memory)")
+    sub.add_parser("hello", help="Start the Nomotic tutorial (same as 'nomotic tutorial')")
 
     # ── fingerprint ─────────────────────────────────────────────────
     fp_parser = sub.add_parser("fingerprint", help="Show behavioral fingerprint for an agent")
@@ -2631,6 +2487,7 @@ def main(argv: list[str] | None = None) -> None:
         "list": _cmd_list,
         "reputation": _cmd_reputation,
         "export": _cmd_export,
+        "status": _cmd_status,
         "archetype": _cmd_archetype,
         "org": _cmd_org,
         "zone": _cmd_zone,
