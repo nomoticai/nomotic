@@ -206,6 +206,22 @@ CROSS_DIMENSIONAL_PATTERNS: list[dict[str, Any]] = [
             "drift or adaptation"
         ),
     },
+    {
+        "name": "oversight_erosion",
+        "description": (
+            "Human oversight engagement is degrading — human_override "
+            "dimension consistently at 1.0 (no overrides) combined with "
+            "external human drift alerts"
+        ),
+        "dimensions": [
+            "human_override",
+        ],
+        "severity": "high",
+        "recommendation": (
+            "Human reviewer may not be exercising independent judgment — "
+            "verify oversight engagement and review human drift alerts"
+        ),
+    },
 ]
 
 
@@ -286,6 +302,10 @@ def _evaluate_pattern(
             _score("precedent_alignment") < 0.5
             and _score("behavioral_consistency") < 0.6
         )
+
+    elif name == "oversight_erosion":
+        # human_override score at or near 1.0 (no overrides happening)
+        return _score("human_override") >= 0.95
 
     return False
 

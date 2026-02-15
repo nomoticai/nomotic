@@ -124,6 +124,14 @@ from nomotic.workflow_governor import (
     WorkflowRiskAssessment,
     WorkflowRiskFactor,
 )
+from nomotic.human_drift import (
+    HumanAuditStore,
+    HumanDriftCalculator,
+    HumanDriftMonitor,
+    HumanDriftResult,
+    HumanInteractionEvent,
+    HumanInteractionProfile,
+)
 from nomotic.context_profile import (
     CompletedStep,
     CompoundMethod,
@@ -293,6 +301,13 @@ __all__ = [
     "WorkflowGovernorConfig",
     "WorkflowRiskAssessment",
     "WorkflowRiskFactor",
+    # Human Drift Detection (Bidirectional Oversight)
+    "HumanAuditStore",
+    "HumanDriftCalculator",
+    "HumanDriftMonitor",
+    "HumanDriftResult",
+    "HumanInteractionEvent",
+    "HumanInteractionProfile",
     # Context Profiles (Phase 7A)
     "CompletedStep",
     "CompoundMethod",

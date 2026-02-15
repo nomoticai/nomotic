@@ -100,6 +100,10 @@ _TESTLOG_AGENT_SUMMARY_RE = re.compile(r"^/v1/testlog/([^/]+)/summary$")
 _TESTLOG_AGENT_VERIFY_RE = re.compile(r"^/v1/testlog/([^/]+)/verify$")
 _TESTLOG_AGENT_EXPORT_RE = re.compile(r"^/v1/testlog/([^/]+)/export$")
 
+# Human engagement API
+_HUMAN_ENGAGEMENT_RE = re.compile(r"^/v1/human-engagement/([^/]+)$")
+_HUMAN_ENGAGEMENT_DRIFT_RE = re.compile(r"^/v1/human-engagement/([^/]+)/drift$")
+
 
 # ── Request handler ─────────────────────────────────────────────────────
 
@@ -425,6 +429,21 @@ class _Handler(BaseHTTPRequestHandler):
             return self._handle_anonymization_policy_get(ctx)
         if path == "/v1/anonymization/policy" and method == "PUT":
             return self._handle_anonymization_policy_put(ctx)
+
+        # ── Human Engagement (Bidirectional Drift) ──────────────────
+        m = _HUMAN_ENGAGEMENT_DRIFT_RE.match(path)
+        if m and method == "GET":
+            return self._handle_human_engagement_drift(ctx, m.group(1))
+
+        m = _HUMAN_ENGAGEMENT_RE.match(path)
+        if m and method == "GET":
+            return self._handle_human_engagement(ctx, m.group(1))
+
+        if path == "/v1/human-engagement/event" and method == "POST":
+            return self._handle_human_engagement_event(ctx)
+
+        if path == "/v1/human-engagement/alerts" and method == "GET":
+            return self._handle_human_engagement_alerts(ctx)
 
         return _error(404, "not_found", f"No route for {method} {path}")
 
@@ -1822,6 +1841,135 @@ class _Handler(BaseHTTPRequestHandler):
         lines = [json.dumps(r.to_dict(), separators=(",", ":")) for r in records]
         body = ("\n".join(lines) + "\n").encode("utf-8")
         return 200, body, "application/x-ndjson"
+
+    # ── Human Engagement handlers ──────────────────────────────────
+
+    def _handle_human_engagement(
+        self, ctx: _ServerContext, reviewer_id: str,
+    ) -> tuple[int, bytes]:
+        from nomotic.human_drift import HumanAuditStore, HumanDriftMonitor, HumanInteractionProfile
+
+        store = HumanAuditStore(ctx.base_dir)
+        events = store.query_all(reviewer_id)
+        if not events:
+            return _error(404, "not_found", f"No events found for reviewer '{reviewer_id}'")
+
+        profile = HumanInteractionProfile.from_events(reviewer_id, events)
+        return 200, _json_bytes({
+            "reviewer_id": reviewer_id,
+            "profile": profile.to_dict(),
+            "total_events": len(events),
+        })
+
+    def _handle_human_engagement_drift(
+        self, ctx: _ServerContext, reviewer_id: str,
+    ) -> tuple[int, bytes]:
+        from nomotic.human_drift import (
+            HumanAuditStore,
+            HumanDriftCalculator,
+            HumanInteractionProfile,
+        )
+
+        store = HumanAuditStore(ctx.base_dir)
+        events = store.query_all(reviewer_id)
+        if not events:
+            return _error(404, "not_found", f"No events found for reviewer '{reviewer_id}'")
+
+        # Need enough events for baseline + recent
+        baseline_window = 200
+        recent_window = 50
+        if len(events) < baseline_window + recent_window:
+            return _error(400, "insufficient_data", (
+                f"Need at least {baseline_window + recent_window} events for drift analysis. "
+                f"Have {len(events)}."
+            ))
+
+        baseline = HumanInteractionProfile.from_events(
+            reviewer_id, events[:baseline_window]
+        )
+        recent = HumanInteractionProfile.from_events(
+            reviewer_id, events[-recent_window:]
+        )
+
+        calculator = HumanDriftCalculator()
+        result = calculator.calculate(baseline, recent)
+
+        return 200, _json_bytes({
+            "reviewer_id": reviewer_id,
+            "drift": result.to_dict(),
+            "baseline_profile": baseline.to_dict(),
+            "recent_profile": recent.to_dict(),
+        })
+
+    def _handle_human_engagement_event(
+        self, ctx: _ServerContext,
+    ) -> tuple[int, bytes]:
+        from nomotic.human_drift import HumanAuditStore, HumanInteractionEvent
+
+        body = self._read_json()
+        required = {"reviewer_id", "agent_id", "action_id", "event_type", "decision",
+                     "review_duration_seconds"}
+        missing = required - set(body.keys())
+        if missing:
+            return _error(400, "missing_fields", f"Missing required fields: {missing}")
+
+        event = HumanInteractionEvent(
+            timestamp=body.get("timestamp", time.time()),
+            reviewer_id=body["reviewer_id"],
+            agent_id=body["agent_id"],
+            action_id=body["action_id"],
+            event_type=body["event_type"],
+            decision=body["decision"],
+            review_duration_seconds=float(body["review_duration_seconds"]),
+            rationale=body.get("rationale", ""),
+            rationale_depth=body.get("rationale_depth", len(body.get("rationale", "").split()) if body.get("rationale") else 0),
+            context_viewed=body.get("context_viewed", False),
+            modifications=body.get("modifications", []),
+        )
+
+        store = HumanAuditStore(ctx.base_dir)
+        store.append(event)
+
+        return 201, _json_bytes({
+            "status": "recorded",
+            "event": event.to_dict(),
+        })
+
+    def _handle_human_engagement_alerts(
+        self, ctx: _ServerContext,
+    ) -> tuple[int, bytes]:
+        from nomotic.human_drift import (
+            HumanAuditStore,
+            HumanDriftCalculator,
+            HumanDriftResult,
+            HumanInteractionProfile,
+        )
+
+        store = HumanAuditStore(ctx.base_dir)
+        reviewers = store.list_reviewers()
+        all_alerts: list[dict[str, Any]] = []
+        baseline_window = 200
+        recent_window = 50
+
+        for reviewer_id in reviewers:
+            events = store.query_all(reviewer_id)
+            if len(events) < baseline_window + recent_window:
+                continue
+            baseline = HumanInteractionProfile.from_events(
+                reviewer_id, events[:baseline_window]
+            )
+            recent = HumanInteractionProfile.from_events(
+                reviewer_id, events[-recent_window:]
+            )
+            calculator = HumanDriftCalculator()
+            result = calculator.calculate(baseline, recent)
+            if result.alerts:
+                all_alerts.append(result.to_dict())
+
+        return 200, _json_bytes({
+            "alerts": all_alerts,
+            "reviewers_checked": len(reviewers),
+        })
 
 
 # ── Server context ──────────────────────────────────────────────────────

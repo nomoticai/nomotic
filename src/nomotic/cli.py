@@ -1649,6 +1649,97 @@ def _cmd_owner(args: argparse.Namespace) -> None:
             print(f"    {a['detail']}")
 
 
+def _cmd_oversight(args: argparse.Namespace) -> None:
+    """Show human oversight engagement profiles and drift analysis."""
+    from nomotic.human_drift import (
+        HumanAuditStore,
+        HumanDriftCalculator,
+        HumanInteractionProfile,
+    )
+
+    store = HumanAuditStore(args.base_dir)
+
+    # --alerts: show all human drift alerts across all reviewers
+    if args.alerts:
+        reviewers = store.list_reviewers()
+        if not reviewers:
+            print("No human interaction data found.")
+            return
+
+        found_alerts = False
+        for reviewer_id in reviewers:
+            events = store.query_all(reviewer_id)
+            if len(events) < 250:  # baseline_window(200) + recent_window(50)
+                continue
+            baseline = HumanInteractionProfile.from_events(reviewer_id, events[:200])
+            recent = HumanInteractionProfile.from_events(reviewer_id, events[-50:])
+            calculator = HumanDriftCalculator()
+            result = calculator.calculate(baseline, recent)
+            if result.alerts:
+                found_alerts = True
+                print(_bold(f"Reviewer: {reviewer_id}") + f"  [{_yellow(result.drift_category)}]")
+                print(f"  Overall drift: {result.overall_drift:.3f}")
+                for alert in result.alerts:
+                    print(f"  {_red('!')} {alert}")
+                print()
+
+        if not found_alerts:
+            print("No human drift alerts detected.")
+        return
+
+    # Require reviewer_id for profile/drift views
+    if args.reviewer_id is None:
+        print("Usage: nomotic oversight <reviewer_id> [--drift] [--alerts]", file=sys.stderr)
+        sys.exit(1)
+
+    reviewer_id = args.reviewer_id
+    events = store.query_all(reviewer_id)
+    if not events:
+        print(f"No events found for reviewer: {reviewer_id}")
+        return
+
+    # --drift: show drift analysis
+    if args.drift:
+        if len(events) < 250:
+            print(f"Insufficient data for drift analysis. Have {len(events)} events, need 250+.")
+            return
+        baseline = HumanInteractionProfile.from_events(reviewer_id, events[:200])
+        recent = HumanInteractionProfile.from_events(reviewer_id, events[-50:])
+        calculator = HumanDriftCalculator()
+        result = calculator.calculate(baseline, recent)
+
+        print(_bold(f"Human Drift Analysis: {reviewer_id}"))
+        print(f"  Category:        {result.drift_category}")
+        print(f"  Overall drift:   {result.overall_drift:.3f}")
+        print(f"  Timing drift:    {result.timing_drift:.3f}")
+        print(f"  Decision drift:  {result.decision_drift:.3f}")
+        print(f"  Engagement drift:{result.engagement_drift:.3f}")
+        print(f"  Throughput drift:{result.throughput_drift:.3f}")
+        if result.alerts:
+            print()
+            print(_bold("Alerts:"))
+            for alert in result.alerts:
+                print(f"  {_red('!')} {alert}")
+        else:
+            print(f"\n  {_green('OK')} No drift alerts.")
+        return
+
+    # Default: show engagement profile
+    profile = HumanInteractionProfile.from_events(reviewer_id, events)
+    print(_bold(f"Human Oversight Profile: {reviewer_id}"))
+    print(f"  Total interactions:    {profile.total_interactions}")
+    print(f"  Mean review duration:  {profile.mean_review_duration:.1f}s")
+    print(f"  Median review duration:{profile.median_review_duration:.1f}s")
+    print(f"  Approval rate:         {profile.approval_rate:.1%}")
+    print(f"  Denial rate:           {profile.denial_rate:.1%}")
+    print(f"  Modification rate:     {profile.modification_rate:.1%}")
+    print(f"  Override rate:         {profile.override_rate:.1%}")
+    print(f"  Rationale provided:    {profile.rationale_provided_rate:.1%}")
+    print(f"  Context viewed:        {profile.context_view_rate:.1%}")
+    print(f"  Mean rationale depth:  {profile.mean_rationale_depth:.1f} words")
+    print(f"  Throughput:            {profile.interactions_per_hour:.1f}/hr")
+
+
 def _cmd_scope(args: argparse.Namespace) -> None:
     """Configure or view an agent's authorized scope."""
     from nomotic.sandbox import (
@@ -3394,6 +3485,12 @@ def build_parser() -> argparse.ArgumentParser:
     owner_parser.add_argument("--host", default="127.0.0.1", help="API server host")
     owner_parser.add_argument("--port", type=int, default=8420, help="API server port")
 
+    # ── oversight (human drift) ─────────────────────────────────
+    oversight_parser = sub.add_parser("oversight", help="Human oversight engagement analysis")
+    oversight_parser.add_argument("reviewer_id", nargs="?", default=None, help="Reviewer identifier")
+    oversight_parser.add_argument("--drift", action="store_true", help="Show drift analysis")
+    oversight_parser.add_argument("--alerts", action="store_true", help="Show all human drift alerts")
+
     return parser
 
 
@@ -3440,6 +3537,7 @@ def main(argv: list[str] | None = None) -> None:
         "testlog": _cmd_testlog,
         "provenance": _cmd_provenance,
         "owner": _cmd_owner,
+        "oversight": _cmd_oversight,
     }
 
     handler = commands.get(args.command)
