@@ -1,10 +1,11 @@
-"""Persistent append-only audit storage with hash chaining.
+"""Persistent append-only log storage with hash chaining.
 
-Audit records are stored as JSONL files in ~/.nomotic/audit/.
-Each record includes a SHA-256 hash of the previous record,
-forming a tamper-evident chain. Records are append-only —
-the file is only ever opened for appending, never for writing
-or truncation.
+Used for both production audit trails and test logs.
+Each agent gets a JSONL file. Each record includes a SHA-256 hash
+of the previous record, forming a tamper-evident chain.
+
+Production audit: base_dir / "audit" / "<agent>.jsonl"
+Test log:         base_dir / "testlog" / "<agent>.jsonl"
 """
 
 from __future__ import annotations
@@ -17,13 +18,15 @@ from typing import Any
 
 __all__ = [
     "AuditStore",
+    "LogStore",
     "PersistentAuditRecord",
+    "PersistentLogRecord",
 ]
 
 
 @dataclass
-class PersistentAuditRecord:
-    """A single audit record with hash chain fields."""
+class PersistentLogRecord:
+    """A single log record with hash chain fields."""
 
     record_id: str
     timestamp: float
@@ -33,14 +36,15 @@ class PersistentAuditRecord:
     verdict: str  # "ALLOW", "DENY", "ESCALATE"
     ucs: float
     tier: int
-    trust_score: float
+    trust_score: float  # trust after this action
     trust_delta: float
     trust_trend: str
-    severity: str
+    severity: str  # "info", "alert", "warning"
     justification: str
     vetoed_by: list[str] = field(default_factory=list)
     dimension_scores: dict[str, float] = field(default_factory=dict)
     parameters: dict[str, Any] = field(default_factory=dict)
+    source: str = ""  # "gateway", "sdk", "cli-test"
     previous_hash: str = ""
     record_hash: str = ""
 
@@ -48,19 +52,34 @@ class PersistentAuditRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> PersistentAuditRecord:
+    def from_dict(cls, d: dict[str, Any]) -> PersistentLogRecord:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
-class AuditStore:
-    """Append-only audit storage with hash chaining."""
+# Backward-compatible alias
+PersistentAuditRecord = PersistentLogRecord
 
-    def __init__(self, base_dir: Path) -> None:
-        self._dir = base_dir / "audit"
+
+class LogStore:
+    """Append-only log storage with hash chaining.
+
+    Usage:
+        audit_store = LogStore(base_dir, "audit")      # production
+        test_store  = LogStore(base_dir, "testlog")     # test
+    """
+
+    def __init__(self, base_dir: Path, log_type: str = "audit") -> None:
+        """
+        Args:
+            base_dir: Root directory (e.g. ~/.nomotic)
+            log_type: Subdirectory name — "audit" or "testlog"
+        """
+        self._dir = base_dir / log_type
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._log_type = log_type
 
     def _agent_file(self, agent_id: str) -> Path:
-        """Get the audit file path for an agent (lowercase normalized)."""
+        """Get the log file path for an agent (lowercase normalized)."""
         safe_name = agent_id.lower().replace("/", "_").replace("\\", "_")
         return self._dir / f"{safe_name}.jsonl"
 
@@ -93,8 +112,8 @@ class AuditStore:
         canonical = json.dumps(hashable, sort_keys=True, separators=(",", ":"))
         return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def append(self, record: PersistentAuditRecord) -> None:
-        """Append a record to the agent's audit file."""
+    def append(self, record: PersistentLogRecord) -> None:
+        """Append a record to the agent's log file."""
         path = self._agent_file(record.agent_id)
         line = json.dumps(record.to_dict(), separators=(",", ":"))
         with open(path, "a", encoding="utf-8") as f:
@@ -105,12 +124,12 @@ class AuditStore:
         agent_id: str,
         limit: int = 20,
         severity: str | None = None,
-    ) -> list[PersistentAuditRecord]:
+    ) -> list[PersistentLogRecord]:
         """Read records for an agent, most recent first."""
         path = self._agent_file(agent_id)
         if not path.exists():
             return []
-        records: list[PersistentAuditRecord] = []
+        records: list[PersistentLogRecord] = []
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -120,25 +139,25 @@ class AuditStore:
                     data = json.loads(line)
                     if severity and data.get("severity") != severity:
                         continue
-                    records.append(PersistentAuditRecord.from_dict(data))
+                    records.append(PersistentLogRecord.from_dict(data))
                 except (json.JSONDecodeError, TypeError):
                     continue
         # Return most recent first, limited
         return list(reversed(records[-limit:]))
 
-    def query_all(self, agent_id: str) -> list[PersistentAuditRecord]:
+    def query_all(self, agent_id: str) -> list[PersistentLogRecord]:
         """Read ALL records for an agent in chronological order."""
         path = self._agent_file(agent_id)
         if not path.exists():
             return []
-        records: list[PersistentAuditRecord] = []
+        records: list[PersistentLogRecord] = []
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    records.append(PersistentAuditRecord.from_dict(json.loads(line)))
+                    records.append(PersistentLogRecord.from_dict(json.loads(line)))
                 except (json.JSONDecodeError, TypeError):
                     continue
         return records
@@ -172,7 +191,7 @@ class AuditStore:
         return True, len(records), "All records verified"
 
     def summary(self, agent_id: str) -> dict[str, Any]:
-        """Generate audit summary for an agent."""
+        """Generate summary for an agent."""
         records = self.query_all(agent_id)
         if not records:
             return {"total": 0}
@@ -194,7 +213,7 @@ class AuditStore:
         }
 
     def seal(self, agent_id: str) -> str:
-        """Compute a seal hash over the entire audit history.
+        """Compute a seal hash over the entire log history.
 
         Used during revocation to create an immutable snapshot.
         Returns the seal hash.
@@ -208,8 +227,15 @@ class AuditStore:
         return "sha256:" + hashlib.sha256(seal_input.encode("utf-8")).hexdigest()
 
     def list_agents(self) -> list[str]:
-        """List all agent IDs that have audit files."""
+        """List all agent IDs that have log files."""
         agents: list[str] = []
         for path in self._dir.glob("*.jsonl"):
             agents.append(path.stem)
         return agents
+
+
+class AuditStore(LogStore):
+    """Backward-compatible alias for LogStore with log_type='audit'."""
+
+    def __init__(self, base_dir: Path) -> None:
+        super().__init__(base_dir, "audit")
