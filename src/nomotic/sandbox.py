@@ -178,6 +178,9 @@ def load_agent_config(base: Path, agent_id: str) -> AgentConfig | None:
 
     Tries numeric-ID-based path first, falls back to name-based path
     for backward compatibility, and migrates on first access.
+
+    Name-based lookups are case-insensitive: ``TestBot`` and ``testbot``
+    resolve to the same config file.
     """
     agents_dir = _agents_dir(base)
 
@@ -188,17 +191,34 @@ def load_agent_config(base: Path, agent_id: str) -> AgentConfig | None:
             data = json.loads(path.read_text(encoding="utf-8"))
             return AgentConfig.from_dict(data)
 
-    # Try name-based path (backward compat)
-    path = agents_dir / f"{agent_id}.json"
-    if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
-        config = AgentConfig.from_dict(data)
-        # Migrate to numeric ID path if we know the numeric ID
-        if config.agent_numeric_id > 0:
-            new_path = agents_dir / f"{config.agent_numeric_id}.json"
-            if not new_path.exists():
-                new_path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
-        return config
+    # Try name-based path (backward compat) — case-insensitive
+    # First try exact match, then lowercase, then scan for any case match
+    for candidate in (agent_id, agent_id.lower()):
+        path = agents_dir / f"{candidate}.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            config = AgentConfig.from_dict(data)
+            # Migrate to numeric ID path if we know the numeric ID
+            if config.agent_numeric_id > 0:
+                new_path = agents_dir / f"{config.agent_numeric_id}.json"
+                if not new_path.exists():
+                    new_path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+            return config
+
+    # Scan for case-insensitive match among all agent config files
+    lookup = agent_id.lower()
+    for config_file in agents_dir.glob("*.json"):
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            if data.get("agent_id", "").lower() == lookup:
+                config = AgentConfig.from_dict(data)
+                if config.agent_numeric_id > 0:
+                    new_path = agents_dir / f"{config.agent_numeric_id}.json"
+                    if not new_path.exists():
+                        new_path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+                return config
+        except (json.JSONDecodeError, KeyError):
+            continue
 
     return None
 
@@ -218,14 +238,19 @@ def save_agent_config(base: Path, config: AgentConfig) -> Path:
 
 
 def find_agent_cert_id(base: Path, agent_id: str) -> str | None:
-    """Find the certificate ID for an agent by scanning cert files."""
+    """Find the certificate ID for an agent by scanning cert files.
+
+    Matching is case-insensitive: ``TestBot`` and ``testbot`` resolve
+    to the same certificate.
+    """
     certs_dir = base / "certs"
     if not certs_dir.exists():
         return None
+    lookup = agent_id.lower()
     for cert_file in certs_dir.glob("nmc-*.json"):
         try:
             data = json.loads(cert_file.read_text(encoding="utf-8"))
-            if data.get("agent_id") == agent_id:
+            if data.get("agent_id", "").lower() == lookup:
                 return data.get("certificate_id")
         except (json.JSONDecodeError, KeyError):
             continue

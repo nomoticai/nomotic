@@ -82,8 +82,8 @@ class AgentIdRegistry:
 
         Accepts:
         - Integer string ("1000") -- exact ID match
-        - Name string ("claims-bot") -- all matching names
-        - Combo string ("claims-bot1000") -- name+ID combo
+        - Name string ("claims-bot") -- all matching names (case-insensitive)
+        - Combo string ("claims-bot1000") -- name+ID combo (case-insensitive)
         - Cert-id string ("nmc-...") -- exact cert match
 
         Returns list of matching agent records (may be multiple for name lookups).
@@ -105,19 +105,20 @@ class AgentIdRegistry:
                 return [{"agent_id": int(identifier), **entry}]
             return []
 
-        # Combo match: name + numeric id
+        # Combo match: name + numeric id (case-insensitive on name part)
         m = _COMBO_RE.match(identifier)
         if m:
             name_part, id_part = m.group(1), m.group(2)
             entry = agents.get(id_part)
-            if entry is not None and entry["name"] == name_part:
+            if entry is not None and entry["name"].lower() == name_part.lower():
                 return [{"agent_id": int(id_part), **entry}]
             # Fall through to name search if combo didn't match
 
-        # Name match (may return multiple)
+        # Name match — case-insensitive (may return multiple)
+        lookup = identifier.lower()
         results: list[dict[str, Any]] = []
         for aid, entry in agents.items():
-            if entry["name"] == identifier:
+            if entry["name"].lower() == lookup:
                 results.append({"agent_id": int(aid), **entry})
         return results
 
