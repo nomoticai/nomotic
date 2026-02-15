@@ -23,6 +23,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Any
 
 from nomotic.authority import CertificateAuthority
@@ -86,6 +87,13 @@ _WORKFLOW_GOV_RE = re.compile(r"^/v1/workflow/([^/]+)/(assessment|dependencies|p
 _WORKFLOW_GOV_STEP_RE = re.compile(r"^/v1/workflow/([^/]+)/assess-step$")
 _ETHICS_REASONING_RE = re.compile(r"^/v1/ethics/reasoning/([^/]+)$")
 
+# Persistent audit API (Phase 10A)
+_AUDIT_AGENT_RECORDS_RE = re.compile(r"^/v1/audit/([^/]+)/records$")
+_AUDIT_AGENT_SUMMARY_RE = re.compile(r"^/v1/audit/([^/]+)/summary$")
+_AUDIT_AGENT_VERIFY_RE = re.compile(r"^/v1/audit/([^/]+)/verify$")
+_AUDIT_AGENT_EXPORT_RE = re.compile(r"^/v1/audit/([^/]+)/export$")
+_AUDIT_AGENT_SEAL_RE = re.compile(r"^/v1/audit/([^/]+)/seal$")
+
 
 # ── Request handler ─────────────────────────────────────────────────────
 
@@ -115,11 +123,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         try:
-            status, body = self._route(method)
+            result = self._route(method)
         except Exception:
-            status, body = _error(500, "internal_error", traceback.format_exc())
+            result = _error(500, "internal_error", traceback.format_exc())
+        if len(result) == 3:
+            status, body, content_type = result  # type: ignore[misc]
+        else:
+            status, body = result
+            content_type = "application/json"
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -257,7 +270,24 @@ class _Handler(BaseHTTPRequestHandler):
         if m and method == "GET":
             return self._handle_get_trust(ctx, m.group(1))
 
-        # Audit (Phase 5)
+        # Persistent audit API (file-based, Phase 10A)
+        m = _AUDIT_AGENT_RECORDS_RE.match(path)
+        if m and method == "GET":
+            return self._handle_audit_agent_records(ctx, m.group(1))
+        m = _AUDIT_AGENT_SUMMARY_RE.match(path)
+        if m and method == "GET":
+            return self._handle_audit_agent_summary(ctx, m.group(1))
+        m = _AUDIT_AGENT_VERIFY_RE.match(path)
+        if m and method == "GET":
+            return self._handle_audit_agent_verify(ctx, m.group(1))
+        m = _AUDIT_AGENT_EXPORT_RE.match(path)
+        if m and method == "GET":
+            return self._handle_audit_agent_export(ctx, m.group(1))
+        m = _AUDIT_AGENT_SEAL_RE.match(path)
+        if m and method == "GET":
+            return self._handle_audit_agent_seal(ctx, m.group(1))
+
+        # In-memory audit (Phase 5, backward compatibility)
         if path == "/v1/audit" and method == "GET":
             return self._handle_audit_query(ctx)
         if path == "/v1/audit/summary" and method == "GET":
@@ -1542,6 +1572,139 @@ class _Handler(BaseHTTPRequestHandler):
             "total": len(profiles),
         })
 
+    # ── Persistent audit API (Phase 10A) ─────────────────────────────
+
+    def _resolve_audit_agent(self, identifier: str) -> str:
+        """Resolve a URL path segment to an agent name for audit lookup.
+
+        Case-insensitive.  Accepts agent name or cert-id.
+        Returns the agent name (as stored in certs) for audit file lookup.
+        """
+        ctx = self.server.ctx
+        if identifier.startswith("nmc-"):
+            cert = ctx.ca.get(identifier) if ctx.ca else None
+            if cert:
+                return cert.agent_id
+            return identifier
+        return identifier
+
+    def _handle_audit_agent_records(
+        self, ctx: _ServerContext, identifier: str,
+    ) -> tuple[int, bytes] | tuple[int, bytes, str]:
+        from nomotic.audit_store import AuditStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = AuditStore(ctx.base_dir)
+
+        params = self._query_params()
+        limit = min(int(params.get("limit", "20")), 500)
+        severity = params.get("severity")
+        fmt = params.get("format", "json")
+
+        records = store.query(agent_id, limit=limit, severity=severity)
+
+        since = params.get("since")
+        if since:
+            try:
+                since_ts = float(since)
+                records = [r for r in records if r.timestamp > since_ts]
+            except ValueError:
+                pass
+
+        if fmt == "jsonl":
+            lines = [json.dumps(r.to_dict(), separators=(",", ":")) for r in records]
+            body = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
+            return 200, body, "application/x-ndjson"
+
+        return 200, _json_bytes({
+            "agent_id": agent_id,
+            "records": [r.to_dict() for r in records],
+            "total": len(records),
+            "chain_fields_included": True,
+        })
+
+    def _handle_audit_agent_summary(
+        self, ctx: _ServerContext, identifier: str,
+    ) -> tuple[int, bytes]:
+        from nomotic.audit_store import AuditStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = AuditStore(ctx.base_dir)
+        summary = store.summary(agent_id)
+
+        if summary.get("total", 0) == 0:
+            return _error(404, "not_found", f"No audit records found for '{agent_id}'")
+
+        summary["agent_id"] = agent_id
+        return 200, _json_bytes(summary)
+
+    def _handle_audit_agent_verify(
+        self, ctx: _ServerContext, identifier: str,
+    ) -> tuple[int, bytes]:
+        from nomotic.audit_store import AuditStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = AuditStore(ctx.base_dir)
+
+        is_valid, count, message = store.verify_chain(agent_id)
+
+        if count == 0:
+            return _error(404, "not_found", f"No audit records found for '{agent_id}'")
+
+        result: dict[str, Any] = {
+            "agent_id": agent_id,
+            "valid": is_valid,
+            "record_count": count,
+            "message": message,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if is_valid:
+            records = store.query_all(agent_id)
+            result["chain_head"] = records[-1].record_hash if records else ""
+
+        return 200, _json_bytes(result)
+
+    def _handle_audit_agent_export(
+        self, ctx: _ServerContext, identifier: str,
+    ) -> tuple[int, bytes] | tuple[int, bytes, str]:
+        from nomotic.audit_store import AuditStore
+
+        agent_id = self._resolve_audit_agent(identifier)
+        store = AuditStore(ctx.base_dir)
+
+        records = store.query_all(agent_id)
+        if not records:
+            return _error(404, "not_found", f"No audit records found for '{agent_id}'")
+
+        lines = [json.dumps(r.to_dict(), separators=(",", ":")) for r in records]
+        body = ("\n".join(lines) + "\n").encode("utf-8")
+        return 200, body, "application/x-ndjson"
+
+    def _handle_audit_agent_seal(
+        self, ctx: _ServerContext, identifier: str,
+    ) -> tuple[int, bytes]:
+        agent_id = self._resolve_audit_agent(identifier)
+
+        revocations_dir = ctx.base_dir / "revocations"
+        if not revocations_dir.exists():
+            return _error(404, "not_found", "Agent is not revoked or no seal found")
+
+        for rev_file in revocations_dir.glob("*.json"):
+            try:
+                data = json.loads(rev_file.read_text(encoding="utf-8"))
+                if data.get("agent_name", "").lower() == agent_id.lower():
+                    from nomotic.audit_store import AuditStore
+
+                    store = AuditStore(ctx.base_dir)
+                    is_valid, _, _ = store.verify_chain(agent_id)
+                    data["chain_valid"] = is_valid
+                    return 200, _json_bytes(data)
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        return _error(404, "not_found", "Agent is not revoked or no seal found")
+
 
 # ── Server context ──────────────────────────────────────────────────────
 
@@ -1557,6 +1720,7 @@ class _ServerContext:
         org_registry: OrganizationRegistry,
         runtime: Any = None,
         evaluator: ProtocolEvaluator | None = None,
+        base_dir: Path | None = None,
     ) -> None:
         self.ca = ca
         self.archetype_registry = archetype_registry
@@ -1564,6 +1728,7 @@ class _ServerContext:
         self.org_registry = org_registry
         self.runtime = runtime
         self.evaluator = evaluator
+        self.base_dir: Path = base_dir or Path.home() / ".nomotic"
         self.started_at = time.time()
 
 
@@ -1592,6 +1757,7 @@ class NomoticAPIServer:
         org_registry: OrganizationRegistry | None = None,
         runtime: Any = None,
         evaluator: ProtocolEvaluator | None = None,
+        base_dir: Path | None = None,
         host: str = "0.0.0.0",
         port: int = 8420,
     ) -> None:
@@ -1601,6 +1767,7 @@ class NomoticAPIServer:
         self._org_registry = org_registry or OrganizationRegistry()
         self._runtime = runtime
         self._evaluator = evaluator
+        self._base_dir = base_dir or Path.home() / ".nomotic"
         self._host = host
         self._port = port
         self._server: NomoticHTTPServer | None = None
@@ -1614,6 +1781,7 @@ class NomoticAPIServer:
             org_registry=self._org_registry,
             runtime=self._runtime,
             evaluator=self._evaluator,
+            base_dir=self._base_dir,
         )
         return server
 
