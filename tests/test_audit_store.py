@@ -1,11 +1,11 @@
-"""Tests for the persistent audit store with hash chaining."""
+"""Tests for the persistent log store with hash chaining."""
 
 import json
 import time
 
 import pytest
 
-from nomotic.audit_store import AuditStore, PersistentAuditRecord
+from nomotic.audit_store import AuditStore, LogStore, PersistentAuditRecord, PersistentLogRecord
 
 
 @pytest.fixture
@@ -41,19 +41,20 @@ def _make_record(
         "vetoed_by": kwargs.get("vetoed_by", []),
         "dimension_scores": kwargs.get("dimension_scores", {}),
         "parameters": kwargs.get("parameters", {}),
+        "source": kwargs.get("source", ""),
         "previous_hash": "",
         "record_hash": "",
     }
 
 
-def _append_chained(store: AuditStore, agent_id: str, records_data: list[dict]) -> list[PersistentAuditRecord]:
+def _append_chained(store, agent_id: str, records_data: list[dict]) -> list[PersistentLogRecord]:
     """Append records with proper hash chaining."""
     result = []
     previous_hash = store.get_last_hash(agent_id)
     for data in records_data:
         data["previous_hash"] = previous_hash
         data["record_hash"] = store.compute_hash(data, previous_hash)
-        record = PersistentAuditRecord(**data)
+        record = PersistentLogRecord(**data)
         store.append(record)
         previous_hash = data["record_hash"]
         result.append(record)
@@ -300,7 +301,7 @@ class TestCaseInsensitiveLookup:
 
 
 class TestPersistentAuditRecord:
-    """Test PersistentAuditRecord serialization."""
+    """Test PersistentAuditRecord/PersistentLogRecord serialization."""
 
     def test_round_trip(self):
         """Record survives to_dict/from_dict round trip."""
@@ -354,6 +355,33 @@ class TestPersistentAuditRecord:
         record = PersistentAuditRecord.from_dict(d)
         assert record.record_id == "x"
 
+    def test_backward_compat_alias(self):
+        """PersistentAuditRecord is an alias for PersistentLogRecord."""
+        assert PersistentAuditRecord is PersistentLogRecord
+
+    def test_source_field(self):
+        """Records support the source field."""
+        record = PersistentLogRecord(
+            record_id="x",
+            timestamp=0.0,
+            agent_id="Bot",
+            action_type="read",
+            action_target="db",
+            verdict="ALLOW",
+            ucs=0.9,
+            tier=2,
+            trust_score=0.5,
+            trust_delta=0.01,
+            trust_trend="rising",
+            severity="info",
+            justification="",
+            source="cli-test",
+        )
+        d = record.to_dict()
+        assert d["source"] == "cli-test"
+        restored = PersistentLogRecord.from_dict(d)
+        assert restored.source == "cli-test"
+
 
 class TestListAgents:
     """Test listing agents with audit files."""
@@ -372,3 +400,118 @@ class TestListAgents:
     def test_list_agents_empty(self, store):
         """list_agents returns empty for fresh store."""
         assert store.list_agents() == []
+
+
+class TestLogStore:
+    """Test LogStore with separate audit/testlog directories."""
+
+    def test_separate_audit_and_testlog(self, tmp_path):
+        """Audit and testlog stores write to different directories."""
+        audit = LogStore(tmp_path, "audit")
+        testlog = LogStore(tmp_path, "testlog")
+
+        r1 = _make_record(record_id="r0", source="gateway")
+        _append_chained(audit, "TestBot", [r1])
+
+        r2 = _make_record(record_id="r1", source="cli-test")
+        _append_chained(testlog, "TestBot", [r2])
+
+        # Each store only sees its own records
+        assert len(audit.query("TestBot")) == 1
+        assert audit.query("TestBot")[0].source == "gateway"
+
+        assert len(testlog.query("TestBot")) == 1
+        assert testlog.query("TestBot")[0].source == "cli-test"
+
+    def test_logstore_hash_chain_valid(self, tmp_path):
+        """Hash chains work independently for audit and testlog."""
+        store = LogStore(tmp_path, "testlog")
+        prev = ""
+        for i in range(5):
+            data = _make_record(record_id=f"r{i}", source="cli-test")
+            data["previous_hash"] = prev
+            data["record_hash"] = store.compute_hash(data, prev)
+            store.append(PersistentLogRecord(**data))
+            prev = data["record_hash"]
+
+        valid, count, msg = store.verify_chain("TestBot")
+        assert valid is True
+        assert count == 5
+
+    def test_logstore_hash_chain_tampered(self, tmp_path):
+        """Tampering detection works on testlog."""
+        store = LogStore(tmp_path, "testlog")
+        prev = ""
+        for i in range(5):
+            data = _make_record(record_id=f"r{i}", source="cli-test")
+            data["previous_hash"] = prev
+            data["record_hash"] = store.compute_hash(data, prev)
+            store.append(PersistentLogRecord(**data))
+            prev = data["record_hash"]
+
+        # Tamper with record #3
+        log_file = tmp_path / "testlog" / "testbot.jsonl"
+        lines = log_file.read_text().strip().split("\n")
+        record = json.loads(lines[2])
+        record["verdict"] = "DENY"
+        lines[2] = json.dumps(record, separators=(",", ":"))
+        log_file.write_text("\n".join(lines) + "\n")
+
+        valid, count, msg = store.verify_chain("TestBot")
+        assert valid is False
+        assert "TAMPERING" in msg
+
+    def test_logstore_case_insensitive(self, tmp_path):
+        """LogStore lookups are case-insensitive."""
+        store = LogStore(tmp_path, "testlog")
+        data = _make_record(record_id="r0", source="cli-test")
+        _append_chained(store, "TestBot", [data])
+
+        assert len(store.query("testbot")) == 1
+        assert len(store.query("TESTBOT")) == 1
+        assert len(store.query("TestBot")) == 1
+
+    def test_logstore_summary(self, tmp_path):
+        """LogStore summary works correctly."""
+        store = LogStore(tmp_path, "testlog")
+        records = [
+            _make_record(record_id="r0", agent_id="Bot", verdict="ALLOW", source="cli-test"),
+            _make_record(record_id="r1", agent_id="Bot", verdict="ALLOW", source="cli-test"),
+            _make_record(record_id="r2", agent_id="Bot", verdict="DENY", severity="alert", source="cli-test"),
+        ]
+        _append_chained(store, "Bot", records)
+
+        s = store.summary("Bot")
+        assert s["total"] == 3
+        assert s["by_verdict"]["ALLOW"] == 2
+        assert s["by_verdict"]["DENY"] == 1
+
+    def test_logstore_seal(self, tmp_path):
+        """LogStore seal is deterministic."""
+        store = LogStore(tmp_path, "testlog")
+        data = _make_record(record_id="r0", agent_id="Bot", source="cli-test")
+        _append_chained(store, "Bot", [data])
+
+        seal = store.seal("Bot")
+        assert seal.startswith("sha256:")
+        assert store.seal("Bot") == seal  # deterministic
+
+    def test_logstore_empty(self, tmp_path):
+        """Empty LogStore returns empty results."""
+        store = LogStore(tmp_path, "testlog")
+        assert store.query("NoAgent") == []
+        valid, count, msg = store.verify_chain("NoAgent")
+        assert valid is True
+        assert count == 0
+
+    def test_audit_store_is_logstore(self):
+        """AuditStore is a subclass of LogStore."""
+        assert issubclass(AuditStore, LogStore)
+
+    def test_logstore_directories_created(self, tmp_path):
+        """LogStore creates the appropriate subdirectory."""
+        LogStore(tmp_path, "audit")
+        assert (tmp_path / "audit").is_dir()
+
+        LogStore(tmp_path, "testlog")
+        assert (tmp_path / "testlog").is_dir()
