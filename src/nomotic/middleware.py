@@ -520,6 +520,7 @@ class NomoticGateway:
     # Map from WSGI environ keys to the canonical header names
     _WSGI_HEADER_MAP: dict[str, str] = {
         "HTTP_X_NOMOTIC_CERT_ID": "X-Nomotic-Cert-ID",
+        "HTTP_X_NOMOTIC_OWNER": "X-Nomotic-Owner",
         "HTTP_X_NOMOTIC_TRUST": "X-Nomotic-Trust",
         "HTTP_X_NOMOTIC_AGE": "X-Nomotic-Age",
         "HTTP_X_NOMOTIC_ARCHETYPE": "X-Nomotic-Archetype",
