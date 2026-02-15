@@ -41,7 +41,9 @@ from nomotic.window import SlidingWindow
 from nomotic.monitor import DriftMonitor, DriftConfig, DriftAlert
 from nomotic.trajectory import TrustTrajectory, TrustEvent
 from nomotic.context import ContextCode, CODES
-from nomotic.audit import AuditRecord, AuditTrail, build_justification
+from nomotic.audit import AuditRecord, AuditTrail, build_justification, verify_chain
+from nomotic.id_registry import AgentIdRegistry
+from nomotic.revocation import create_revocation_seal, load_revocation_seal
 from nomotic.provenance import ProvenanceRecord, ProvenanceLog
 from nomotic.accountability import (
     OwnerActivity,
@@ -209,6 +211,10 @@ __all__ = [
     "AuditRecord",
     "AuditTrail",
     "build_justification",
+    "verify_chain",
+    "AgentIdRegistry",
+    "create_revocation_seal",
+    "load_revocation_seal",
     "ProvenanceRecord",
     "ProvenanceLog",
     "OwnerActivity",

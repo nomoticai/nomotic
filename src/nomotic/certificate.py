@@ -71,6 +71,7 @@ class AgentCertificate:
     lineage: str | None
     issuer_signature: bytes
     expires_at: datetime | None = None
+    agent_numeric_id: int = 0  # Sequential ID from registry
 
     # ── Serialization ────────────────────────────────────────────────
 
@@ -78,6 +79,7 @@ class AgentCertificate:
         """Convert to a JSON-serializable dict with sorted keys."""
         return {
             "agent_id": self.agent_id,
+            "agent_numeric_id": self.agent_numeric_id,
             "archetype": self.archetype,
             "behavioral_age": self.behavioral_age,
             "certificate_id": self.certificate_id,
@@ -151,6 +153,7 @@ class AgentCertificate:
             lineage=d.get("lineage"),
             issuer_signature=base64.b64decode(d["issuer_signature"]),
             expires_at=datetime.fromisoformat(expires_raw) if expires_raw else None,
+            agent_numeric_id=d.get("agent_numeric_id", 0),
         )
 
     @classmethod
