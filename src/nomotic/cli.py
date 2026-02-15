@@ -41,6 +41,7 @@ from pathlib import Path
 
 from nomotic.authority import CertificateAuthority
 from nomotic.certificate import AgentCertificate, CertStatus
+from nomotic.id_registry import AgentIdRegistry
 from nomotic.keys import SigningKey, VerifyKey
 from nomotic.registry import (
     ArchetypeRegistry,
@@ -162,53 +163,88 @@ def _build_registries(base: Path) -> tuple[ArchetypeRegistry, ZoneValidator, Org
     return archetype_reg, zone_val, org_reg
 
 
+# ── Agent ID registry helpers ────────────────────────────────────────────
+
+
+def _load_registry(base: Path) -> AgentIdRegistry:
+    """Load the AgentIdRegistry, running migration on first use."""
+    registry = AgentIdRegistry(base)
+    if not registry._path.exists():
+        # First use — migrate existing certs
+        certs_dir = base / "certs"
+        registry.migrate_from_certs(certs_dir)
+        registry._save()
+    return registry
+
+
 # ── Identifier resolution ────────────────────────────────────────────────
 
 
-def _resolve_cert_id(base: Path, identifier: str) -> str:
-    """Resolve an identifier to a certificate ID.
+def _resolve_agent(base: Path, identifier: str) -> tuple[int, str, str]:
+    """Resolve an identifier to (agent_numeric_id, name, cert_id).
 
-    Accepts either:
-    - A certificate ID (starts with 'nmc-') — returned as-is
-    - An agent ID — looks up the most recent active certificate for that agent
-
-    Exits with error if not found.
+    Uses the AgentIdRegistry for resolution.
+    Falls back to scanning cert files for old-format agents without
+    registry entries.
     """
+    registry = _load_registry(base)
+
+    try:
+        match = registry.resolve_single(identifier)
+        return match["agent_id"], match["name"], match["certificate_id"]
+    except ValueError:
+        pass
+
+    # Fall back: try registry.resolve for multiple matches
+    matches = registry.resolve(identifier)
+    if len(matches) > 1:
+        print(f"Ambiguous identifier '{identifier}' matches multiple agents:", file=sys.stderr)
+        for m in matches:
+            print(f"  ID {m['agent_id']}: {m['name']} ({m['certificate_id']})", file=sys.stderr)
+        print("  Use numeric ID or name+ID combo to disambiguate.", file=sys.stderr)
+        sys.exit(1)
+
+    if len(matches) == 1:
+        m = matches[0]
+        return m["agent_id"], m["name"], m["certificate_id"]
+
+    # Fall back to scanning cert files for old-format agents
     if identifier.startswith("nmc-"):
-        return identifier
+        # Direct cert-id — check file exists
+        certs_dir = base / "certs"
+        cert_path = certs_dir / f"{identifier}.json"
+        if cert_path.exists():
+            data = json.loads(cert_path.read_text(encoding="utf-8"))
+            return data.get("agent_numeric_id", 0), data.get("agent_id", ""), identifier
+        revoked_path = base / "revoked" / f"{identifier}.json"
+        if revoked_path.exists():
+            data = json.loads(revoked_path.read_text(encoding="utf-8"))
+            return data.get("agent_numeric_id", 0), data.get("agent_id", ""), identifier
 
-    # Treat as agent-id, scan certs directory
+    # Try scanning certs for agent name match (old-format without registry)
     certs_dir = base / "certs"
-    if not certs_dir.exists():
-        print("No certificates found. Run 'nomotic birth' first.", file=sys.stderr)
-        sys.exit(1)
+    if certs_dir.exists():
+        for cert_file in certs_dir.glob("nmc-*.json"):
+            try:
+                data = json.loads(cert_file.read_text(encoding="utf-8"))
+                if data.get("agent_id") == identifier:
+                    return (
+                        data.get("agent_numeric_id", 0),
+                        data.get("agent_id", ""),
+                        data["certificate_id"],
+                    )
+            except (json.JSONDecodeError, KeyError):
+                continue
 
-    matches: list[tuple[str, str]] = []  # (cert_id, status)
-    for cert_file in certs_dir.glob("nmc-*.json"):
-        try:
-            data = json.loads(cert_file.read_text(encoding="utf-8"))
-            if data.get("agent_id") == identifier:
-                matches.append((data["certificate_id"], data.get("status", "UNKNOWN")))
-        except (json.JSONDecodeError, KeyError):
-            continue
+    print(f"No agent found for identifier '{identifier}'.", file=sys.stderr)
+    print("  Use 'nomotic list' to see available agents.", file=sys.stderr)
+    sys.exit(1)
 
-    if not matches:
-        print(f"No certificate found for agent '{identifier}'.", file=sys.stderr)
-        print("  Use 'nomotic list' to see available certificates.", file=sys.stderr)
-        sys.exit(1)
 
-    # Prefer ACTIVE certificates
-    active = [c for c, s in matches if s == "ACTIVE"]
-    if active:
-        if len(active) > 1:
-            print(f"Multiple active certificates for '{identifier}':", file=sys.stderr)
-            for c in active:
-                print(f"  {c}", file=sys.stderr)
-            print("  Using most recent. Specify cert-id directly to choose.", file=sys.stderr)
-        return active[-1]
-
-    # Fall back to most recent of any status
-    return matches[-1][0]
+def _resolve_cert_id(base: Path, identifier: str) -> str:
+    """Backward-compatible wrapper: resolve identifier to cert_id only."""
+    _numeric_id, _name, cert_id = _resolve_agent(base, identifier)
+    return cert_id
 
 
 # ── CLI commands ─────────────────────────────────────────────────────────
@@ -219,19 +255,24 @@ def _cmd_birth(args: argparse.Namespace) -> None:
     zone_path = args.zone or "global"
     arch_reg, zone_val, _org_reg = _build_registries(args.base_dir)
 
-    # Check for duplicate agent-id
-    certs_dir = args.base_dir / "certs"
-    if certs_dir.exists():
-        for cert_file in certs_dir.glob("nmc-*.json"):
-            try:
-                data = json.loads(cert_file.read_text(encoding="utf-8"))
-                if data.get("agent_id") == args.agent_id and data.get("status") == "ACTIVE":
-                    print(f"Error: An active agent with id '{args.agent_id}' already exists.", file=sys.stderr)
-                    print(f"  Certificate: {data.get('certificate_id')}", file=sys.stderr)
-                    print(f"  Use a different --agent-id, or revoke the existing certificate first.", file=sys.stderr)
-                    sys.exit(1)
-            except (json.JSONDecodeError, KeyError):
-                continue
+    # Resolve name from --name or --agent-id (backward compat)
+    agent_name = args.name or getattr(args, "agent_id_compat", None)
+    if not agent_name:
+        print("Error: --name is required.", file=sys.stderr)
+        sys.exit(1)
+    args.name = agent_name
+
+    # Load or create the AgentIdRegistry
+    registry = _load_registry(args.base_dir)
+
+    # Check for duplicate active name within the same org via registry
+    existing = registry.list_all(status="ACTIVE")
+    for entry in existing:
+        if entry["name"] == args.name and entry["organization"] == args.org:
+            print(f"Error: An active agent named '{args.name}' already exists in org '{args.org}'.", file=sys.stderr)
+            print(f"  ID: {entry['agent_id']}, Certificate: {entry['certificate_id']}", file=sys.stderr)
+            print(f"  Use a different --name, or revoke the existing agent first.", file=sys.stderr)
+            sys.exit(1)
 
     # Validate archetype
     archetype = args.archetype
@@ -255,28 +296,39 @@ def _cmd_birth(args: argparse.Namespace) -> None:
         print(f"Invalid zone path '{zone_path}': {'; '.join(zone_result.errors)}", file=sys.stderr)
         sys.exit(1)
 
+    # Allocate sequential numeric ID
+    numeric_id = registry.next_id()
+
     cert, agent_sk = ca.issue(
-        agent_id=args.agent_id,
+        agent_id=args.name,
         archetype=archetype,
         organization=args.org,
         zone_path=zone_path,
         owner=args.owner or "",
     )
+
+    # Set numeric ID on certificate and re-save
+    cert.agent_numeric_id = numeric_id
+    store.update(cert)
+
+    # Register in the ID registry
+    registry.register(numeric_id, args.name, cert.certificate_id, args.org)
+
     # Save agent keys alongside certificate
     store.save_agent_key(cert.certificate_id, agent_sk.to_bytes())
     store.save_agent_pub(cert.certificate_id, cert.public_key)
 
-    print(f"Certificate issued: {cert.certificate_id}")
-    print(f"  Agent:     {cert.agent_id}")
-    print(f"  Owner:     {cert.owner}")
-    print(f"  Archetype: {cert.archetype}")
-    print(f"  Org:       {cert.organization}")
-    print(f"  Zone:      {cert.zone_path}")
-    print(f"  Trust:     {cert.trust_score}")
-    print(f"  Age:       {cert.behavioral_age}")
-    print(f"  Status:    {cert.status.name}")
-    print(f"  Issued:    {cert.issued_at.isoformat()}")
-    print(f"  Fingerprint: {cert.fingerprint}")
+    print()
+    print("Agent created:")
+    print(f"  ID:          {numeric_id}")
+    print(f"  Name:        {cert.agent_id}")
+    print(f"  Certificate: {cert.certificate_id}")
+    print(f"  Owner:       {cert.owner}")
+    print(f"  Archetype:   {cert.archetype}")
+    print(f"  Org:         {cert.organization}")
+    print(f"  Zone:        {cert.zone_path}")
+    print(f"  Trust:       {cert.trust_score:.2f}")
+    print(f"  Status:      {cert.status.name}")
 
 
 def _cmd_verify(args: argparse.Namespace) -> None:
@@ -311,34 +363,69 @@ def _cmd_inspect(args: argparse.Namespace) -> None:
 
 def _cmd_suspend(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    numeric_id, _name, cert_id = _resolve_agent(args.base_dir, args.cert_id)
     try:
         cert = ca.suspend(cert_id, args.reason)
     except (KeyError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
+    # Update registry status
+    if numeric_id > 0:
+        registry = _load_registry(args.base_dir)
+        try:
+            registry.update_status(numeric_id, "SUSPENDED")
+        except KeyError:
+            pass
     print(f"Suspended: {cert.certificate_id}")
 
 
 def _cmd_reactivate(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    numeric_id, _name, cert_id = _resolve_agent(args.base_dir, args.cert_id)
     try:
         cert = ca.reactivate(cert_id)
     except (KeyError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
+    # Update registry status
+    if numeric_id > 0:
+        registry = _load_registry(args.base_dir)
+        try:
+            registry.update_status(numeric_id, "ACTIVE")
+        except KeyError:
+            pass
     print(f"Reactivated: {cert.certificate_id}")
 
 
 def _cmd_revoke(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    cert_id = _resolve_cert_id(args.base_dir, args.cert_id)
+    numeric_id, name, cert_id = _resolve_agent(args.base_dir, args.cert_id)
     try:
         cert = ca.revoke(cert_id, args.reason)
     except (KeyError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
+
+    # Update registry status
+    registry = _load_registry(args.base_dir)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if numeric_id > 0:
+        try:
+            registry.update_status(numeric_id, "REVOKED", revoked_at=now_iso)
+        except KeyError:
+            pass
+
+    # Create revocation seal
+    from nomotic.revocation import create_revocation_seal
+    create_revocation_seal(
+        args.base_dir,
+        agent_id=numeric_id,
+        agent_name=name,
+        certificate_id=cert_id,
+        reason=args.reason,
+        cert=cert,
+    )
+
     print(f"Revoked: {cert.certificate_id}")
 
 
@@ -358,13 +445,57 @@ def _cmd_renew(args: argparse.Namespace) -> None:
 
 def _cmd_list(args: argparse.Namespace) -> None:
     ca, _store = _build_ca(args.base_dir)
-    status = CertStatus[args.status.upper()] if args.status else None
-    certs = ca.list(org=args.org, status=status, archetype=args.archetype)
+    status_filter = CertStatus[args.status.upper()] if args.status else None
+
+    # Special handling for REVOKED status — show from revocation records
+    if status_filter == CertStatus.REVOKED:
+        registry = _load_registry(args.base_dir)
+        revoked_agents = registry.list_all(status="REVOKED", org=args.org)
+        if not revoked_agents:
+            print("No revoked agents found.")
+            return
+
+        print()
+        print("Revoked Agents:")
+        print()
+        print(f"  {'ID':<6}{'Name':<14}{'Org':<17}{'Revoked':<13}{'Reason'}")
+        print(f"  {'─' * 4}  {'─' * 12}  {'─' * 15}  {'─' * 11}  {'─' * 23}")
+        for agent in revoked_agents:
+            revoked_at = agent.get("revoked_at", "")
+            if revoked_at:
+                revoked_date = revoked_at[:10]
+            else:
+                revoked_date = "unknown"
+            # Load reason from revocation seal if available
+            reason = ""
+            seal_path = args.base_dir / "revocations" / f"{agent['agent_id']}.json"
+            if seal_path.exists():
+                try:
+                    seal = json.loads(seal_path.read_text(encoding="utf-8"))
+                    reason = seal.get("reason", "")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            print(f"  {agent['agent_id']:<6}{agent['name']:<14}{agent['organization']:<17}{revoked_date:<13}{reason}")
+        print()
+        return
+
+    certs = ca.list(org=args.org, status=status_filter, archetype=args.archetype)
     if not certs:
         print("No certificates found.")
         return
+
+    # Load registry for numeric IDs
+    registry = _load_registry(args.base_dir)
+
     for cert in certs:
-        print(f"{cert.certificate_id}  {cert.agent_id:20s}  {cert.status.name:10s}  trust={cert.trust_score:.2f}  age={cert.behavioral_age}")
+        nid = cert.agent_numeric_id
+        if nid == 0:
+            # Try to find in registry
+            matches = registry.resolve(cert.agent_id)
+            if matches:
+                nid = matches[0]["agent_id"]
+        id_str = str(nid) if nid > 0 else "?"
+        print(f"  {id_str:<6}{cert.agent_id:20s}  {cert.status.name:10s}  trust={cert.trust_score:.2f}  age={cert.behavioral_age}  cert={cert.certificate_id}")
 
 
 def _cmd_reputation(args: argparse.Namespace) -> None:
@@ -1144,15 +1275,29 @@ def _cmd_rule(args: argparse.Namespace) -> None:
 
 
 def _cmd_config(args: argparse.Namespace) -> None:
-    """Show the complete governance configuration for an agent."""
+    """Show the complete governance configuration for an agent, or set config values."""
     from nomotic.sandbox import load_agent_config
+
+    # Handle "config set" subcommand
+    config_cmd = getattr(args, "config_command", None)
+    if config_cmd == "set":
+        _cmd_config_set(args)
+        return
 
     agent_id = args.agent_id
 
+    # Resolve agent identifier
+    try:
+        _numeric_id, resolved_name, cert_id = _resolve_agent(args.base_dir, agent_id)
+        agent_id = resolved_name
+    except SystemExit:
+        cert_id = None
+
     # Try to load certificate info
     ca, _store = _build_ca(args.base_dir)
-    from nomotic.sandbox import find_agent_cert_id
-    cert_id = find_agent_cert_id(args.base_dir, agent_id)
+    if cert_id is None:
+        from nomotic.sandbox import find_agent_cert_id
+        cert_id = find_agent_cert_id(args.base_dir, agent_id)
     cert = ca.get(cert_id) if cert_id else None
 
     # Load governance config
@@ -1548,6 +1693,117 @@ def _cmd_simulate(args: argparse.Namespace) -> None:
     # Update certificate trust
     if cert is not None:
         ca.update_trust(cert.certificate_id, end_trust)
+
+
+def _cmd_config_set(args: argparse.Namespace) -> None:
+    """Handle 'nomotic config set --retention <period>'."""
+    if args.retention is not None:
+        valid_periods = {"2y", "3y", "5y", "forever"}
+        if args.retention not in valid_periods:
+            print(f"Invalid retention period: {args.retention}", file=sys.stderr)
+            print(f"  Valid values: {', '.join(sorted(valid_periods))}", file=sys.stderr)
+            sys.exit(1)
+        config_path = args.base_dir / "config.json"
+        config_data: dict = {}
+        if config_path.exists():
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+        config_data["retention"] = args.retention
+        args.base_dir.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+        print(f"Retention set to: {args.retention}")
+        print("  Note: Retention is recorded but not yet enforced (all records are kept).")
+    else:
+        print("No configuration value specified.", file=sys.stderr)
+        print("  Use --retention to set audit retention period.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_history(args: argparse.Namespace) -> None:
+    """Show the complete historical record for any agent (including revoked)."""
+    numeric_id, name, cert_id = _resolve_agent(args.base_dir, args.identifier)
+
+    ca, _store = _build_ca(args.base_dir)
+    cert = ca.get(cert_id)
+
+    registry = _load_registry(args.base_dir)
+    entry = registry.get(numeric_id) if numeric_id > 0 else None
+
+    status = "UNKNOWN"
+    revoked_at = ""
+    reason = ""
+    seal_data: dict = {}
+
+    if entry:
+        status = entry.get("status", "UNKNOWN")
+    elif cert:
+        status = cert.status.name
+
+    # Check for revocation seal
+    seal_path = args.base_dir / "revocations" / f"{numeric_id}.json"
+    if seal_path.exists():
+        try:
+            seal_data = json.loads(seal_path.read_text(encoding="utf-8"))
+            revoked_at = seal_data.get("revoked_at", "")
+            reason = seal_data.get("reason", "")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    print()
+    print(f"History: {name} (ID: {numeric_id})")
+
+    if status == "REVOKED" and revoked_at:
+        print(f"  Status: REVOKED ({revoked_at[:10]})")
+    else:
+        print(f"  Status: {status}")
+    print(f"  {'─' * 37}")
+    print()
+
+    # Lifecycle
+    print("  Lifecycle:")
+    if cert:
+        print(f"    Born:     {cert.issued_at.strftime('%Y-%m-%d %H:%M')}  (trust: 0.500)")
+    elif entry:
+        created = entry.get("created_at", "unknown")
+        print(f"    Born:     {created[:16] if len(created) >= 16 else created}  (trust: 0.500)")
+
+    if seal_data:
+        peak_trust = seal_data.get("peak_trust", 0.5)
+        final_trust = seal_data.get("final_trust", 0.05)
+        total_evals = seal_data.get("total_evaluations", 0)
+        total_violations = seal_data.get("total_violations", 0)
+        print(f"    Peak:     (trust: {peak_trust:.3f})")
+        if revoked_at:
+            print(f"    Revoked:  {revoked_at[:16]}  (trust: {final_trust:.3f})")
+        if reason:
+            print(f"    Reason:   {reason}")
+
+        print()
+        print("  Summary:")
+        allowed = total_evals - total_violations
+        violation_rate = (total_violations / total_evals * 100) if total_evals > 0 else 0.0
+        print(f"    Total evaluations:  {total_evals}")
+        print(f"    Allowed:            {allowed}")
+        print(f"    Denied:             {total_violations}")
+        print(f"    Violation rate:     {violation_rate:.1f}%")
+
+        audit_seal = seal_data.get("audit_seal", "")
+        if audit_seal:
+            print()
+            print(f"  Audit seal: {audit_seal}")
+
+        chain_verified = seal_data.get("chain_records", 0)
+        if chain_verified > 0:
+            print(f"  Chain integrity: verified ({chain_verified} records)")
+    elif cert:
+        trust = cert.trust_score
+        age = cert.behavioral_age
+        print(f"    Current:  (trust: {trust:.3f})")
+        print()
+        print("  Summary:")
+        print(f"    Behavioral age:     {age}")
+        print(f"    Current trust:      {trust:.3f}")
+
+    print()
 
 
 def _cmd_tutorial(args: argparse.Namespace) -> None:
@@ -2267,7 +2523,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # birth
     birth = sub.add_parser("birth", help="Issue a new agent certificate")
-    birth.add_argument("--agent-id", required=True, help="Agent identifier")
+    birth.add_argument("--name", default=None, help="Human-readable agent name")
+    birth.add_argument("--agent-id", dest="agent_id_compat", default=None, help=argparse.SUPPRESS)
     birth.add_argument("--owner", default=None, help="Accountable owner of the agent")
     birth.add_argument("--archetype", required=True, help="Behavioral archetype")
     birth.add_argument("--org", required=True, help="Organization")
@@ -2275,29 +2532,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     # verify
     verify = sub.add_parser("verify", help="Verify a certificate")
-    verify.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    verify.add_argument("cert_id", help="Agent ID, name, or certificate ID")
 
     # inspect
     inspect_ = sub.add_parser("inspect", help="Inspect a certificate")
-    inspect_.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    inspect_.add_argument("cert_id", help="Agent ID, name, or certificate ID")
 
     # suspend
     suspend = sub.add_parser("suspend", help="Suspend a certificate")
-    suspend.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    suspend.add_argument("cert_id", help="Agent ID, name, or certificate ID")
     suspend.add_argument("--reason", required=True, help="Reason for suspension")
 
     # reactivate
     reactivate = sub.add_parser("reactivate", help="Reactivate a suspended certificate")
-    reactivate.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    reactivate.add_argument("cert_id", help="Agent ID, name, or certificate ID")
 
     # revoke
     revoke = sub.add_parser("revoke", help="Permanently revoke a certificate")
-    revoke.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    revoke.add_argument("cert_id", help="Agent ID, name, or certificate ID")
     revoke.add_argument("--reason", required=True, help="Reason for revocation")
 
     # renew
     renew = sub.add_parser("renew", help="Renew a certificate with lineage link")
-    renew.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    renew.add_argument("cert_id", help="Agent ID, name, or certificate ID")
 
     # list
     list_ = sub.add_parser("list", help="List certificates")
@@ -2307,15 +2564,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # reputation
     rep = sub.add_parser("reputation", help="Show trust trajectory")
-    rep.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    rep.add_argument("cert_id", help="Agent ID, name, or certificate ID")
 
     # export
     export = sub.add_parser("export", help="Export public certificate to file")
-    export.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    export.add_argument("cert_id", help="Agent ID, name, or certificate ID")
 
     # ── status ──────────────────────────────────────────────────────
     status = sub.add_parser("status", help="Quick operational status for an agent")
-    status.add_argument("cert_id", help="Certificate ID (nmc-...) or agent ID")
+    status.add_argument("cert_id", help="Agent ID, name, or certificate ID")
 
     # ── archetype subcommands ────────────────────────────────────────
     archetype = sub.add_parser("archetype", help="Manage archetypes")
@@ -2355,7 +2612,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── scope ───────────────────────────────────────────────────────
     scope = sub.add_parser("scope", help="Configure agent authority scope")
-    scope.add_argument("agent_id", help="Agent identifier")
+    scope.add_argument("agent_id", help="Agent ID, name, or certificate ID")
     scope_sub = scope.add_subparsers(dest="scope_command")
     scope_set = scope_sub.add_parser("set", help="Set scope and boundaries")
     scope_set.add_argument("--actions", default=None, help="Comma-separated allowed actions")
@@ -2364,7 +2621,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── rule ────────────────────────────────────────────────────────
     rule = sub.add_parser("rule", help="Manage governance rules")
-    rule.add_argument("agent_id", help="Agent identifier")
+    rule.add_argument("agent_id", help="Agent ID, name, or certificate ID")
     rule_sub = rule.add_subparsers(dest="rule_command")
     rule_add = rule_sub.add_parser("add", help="Add a governance rule")
     rule_add.add_argument("--type", required=True, choices=["ethical", "human-override"], help="Rule type")
@@ -2375,22 +2632,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── config show ─────────────────────────────────────────────────
     config = sub.add_parser("config", help="Show governance configuration")
-    config.add_argument("agent_id", help="Agent identifier")
+    config.add_argument("agent_id", help="Agent ID, name, or certificate ID")
+    config_sub = config.add_subparsers(dest="config_command")
+    config_set = config_sub.add_parser("set", help="Set a configuration value")
+    config_set.add_argument("--retention", default=None, help="Audit retention period (2y, 3y, 5y, forever)")
 
     # configure (alias for config)
     configure = sub.add_parser("configure", help="Show governance configuration (alias for 'config')")
-    configure.add_argument("agent_id", help="Agent identifier")
+    configure.add_argument("agent_id", help="Agent ID, name, or certificate ID")
 
     # ── eval ────────────────────────────────────────────────────────
     eval_parser = sub.add_parser("eval", help="Evaluate a single action through the governance pipeline")
-    eval_parser.add_argument("agent_id", help="Agent identifier")
+    eval_parser.add_argument("agent_id", help="Agent ID, name, or certificate ID")
     eval_parser.add_argument("--action", required=True, help="Action type to evaluate")
     eval_parser.add_argument("--target", default=None, help="Target resource")
     eval_parser.add_argument("--params", default=None, help="JSON parameters")
 
     # ── simulate ────────────────────────────────────────────────────
     sim_parser = sub.add_parser("simulate", help="Run a batch governance simulation")
-    sim_parser.add_argument("agent_id", help="Agent identifier")
+    sim_parser.add_argument("agent_id", help="Agent ID, name, or certificate ID")
     sim_parser.add_argument("--scenario", required=True, help="Scenario name (normal, drift, violations, mixed)")
     sim_parser.add_argument("--count", type=int, default=None, help="Override action count")
     sim_parser.add_argument("--description", default=None, help="Custom scenario description")
@@ -2405,6 +2665,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── hello ────────────────────────────────────────────────────────
     sub.add_parser("hello", help="Start the Nomotic tutorial (same as 'nomotic tutorial')")
+
+    # ── history ─────────────────────────────────────────────────────
+    history = sub.add_parser("history", help="Full historical record for an agent (including revoked)")
+    history.add_argument("identifier", help="Agent ID, name, or certificate ID")
 
     # ── fingerprint ─────────────────────────────────────────────────
     fp_parser = sub.add_parser("fingerprint", help="Show behavioral fingerprint for an agent")
@@ -2488,6 +2752,7 @@ def main(argv: list[str] | None = None) -> None:
         "reputation": _cmd_reputation,
         "export": _cmd_export,
         "status": _cmd_status,
+        "history": _cmd_history,
         "archetype": _cmd_archetype,
         "org": _cmd_org,
         "zone": _cmd_zone,

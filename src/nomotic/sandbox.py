@@ -131,6 +131,7 @@ class AgentConfig:
     """Persistent configuration for an agent's governance envelope."""
 
     agent_id: str
+    agent_numeric_id: int = 0
     actions: list[str] = field(default_factory=list)
     boundaries: list[str] = field(default_factory=list)
     ethical_rules: list[EthicalRuleSpec] = field(default_factory=list)
@@ -139,6 +140,7 @@ class AgentConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "agent_id": self.agent_id,
+            "agent_numeric_id": self.agent_numeric_id,
             "scope": {
                 "actions": self.actions,
                 "boundaries": self.boundaries,
@@ -157,6 +159,7 @@ class AgentConfig:
         overrides = [HumanOverrideSpec.from_dict(r) for r in rules if r.get("type") == "human-override"]
         return cls(
             agent_id=d["agent_id"],
+            agent_numeric_id=d.get("agent_numeric_id", 0),
             actions=scope.get("actions", []),
             boundaries=scope.get("boundaries", []),
             ethical_rules=ethical,
@@ -171,17 +174,45 @@ def _agents_dir(base: Path) -> Path:
 
 
 def load_agent_config(base: Path, agent_id: str) -> AgentConfig | None:
-    """Load an agent's governance config from disk, or None if not found."""
-    path = _agents_dir(base) / f"{agent_id}.json"
-    if not path.exists():
-        return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return AgentConfig.from_dict(data)
+    """Load an agent's governance config from disk, or None if not found.
+
+    Tries numeric-ID-based path first, falls back to name-based path
+    for backward compatibility, and migrates on first access.
+    """
+    agents_dir = _agents_dir(base)
+
+    # Try numeric ID path first (if agent_id is numeric)
+    if agent_id.isdigit():
+        path = agents_dir / f"{agent_id}.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return AgentConfig.from_dict(data)
+
+    # Try name-based path (backward compat)
+    path = agents_dir / f"{agent_id}.json"
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        config = AgentConfig.from_dict(data)
+        # Migrate to numeric ID path if we know the numeric ID
+        if config.agent_numeric_id > 0:
+            new_path = agents_dir / f"{config.agent_numeric_id}.json"
+            if not new_path.exists():
+                new_path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+        return config
+
+    return None
 
 
 def save_agent_config(base: Path, config: AgentConfig) -> Path:
-    """Save an agent's governance config to disk."""
-    path = _agents_dir(base) / f"{config.agent_id}.json"
+    """Save an agent's governance config to disk.
+
+    Uses numeric-ID-based path if available, otherwise falls back to name.
+    """
+    agents_dir = _agents_dir(base)
+    if config.agent_numeric_id > 0:
+        path = agents_dir / f"{config.agent_numeric_id}.json"
+    else:
+        path = agents_dir / f"{config.agent_id}.json"
     path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
     return path
 

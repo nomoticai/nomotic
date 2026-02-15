@@ -11,6 +11,7 @@ code, or by severity.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -24,6 +25,7 @@ __all__ = [
     "AuditRecord",
     "AuditTrail",
     "build_justification",
+    "verify_chain",
 ]
 
 
@@ -78,6 +80,49 @@ class AuditRecord:
     # Additional metadata
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # Hash chain fields
+    previous_hash: str = ""      # SHA-256 hash of the previous record
+    record_hash: str = ""        # SHA-256 hash of this record (computed on creation)
+
+    def compute_hash(self) -> str:
+        """Compute the SHA-256 hash of this record.
+
+        Serializes the record (without record_hash) to canonical JSON,
+        prepends the previous_hash, and computes SHA-256.
+        """
+        d = self._hashable_dict()
+        canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
+        payload = self.previous_hash + canonical
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _hashable_dict(self) -> dict[str, Any]:
+        """Dict of all fields except record_hash, for hashing."""
+        d: dict[str, Any] = {
+            "record_id": self.record_id,
+            "timestamp": self.timestamp,
+            "context_code": self.context_code,
+            "severity": self.severity,
+            "agent_id": self.agent_id,
+            "owner_id": self.owner_id,
+            "user_id": self.user_id,
+            "action_id": self.action_id,
+            "action_type": self.action_type,
+            "action_target": self.action_target,
+            "verdict": self.verdict,
+            "ucs": round(self.ucs, 4),
+            "tier": self.tier,
+            "dimension_scores": self.dimension_scores,
+            "trust_score": round(self.trust_score, 4),
+            "trust_trend": self.trust_trend,
+            "drift_overall": round(self.drift_overall, 4) if self.drift_overall is not None else None,
+            "drift_severity": self.drift_severity,
+            "justification": self.justification,
+            "previous_hash": self.previous_hash,
+        }
+        if self.metadata:
+            d["metadata"] = self.metadata
+        return d
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-friendly dict."""
         d: dict[str, Any] = {
@@ -100,6 +145,8 @@ class AuditRecord:
             "drift_overall": round(self.drift_overall, 4) if self.drift_overall is not None else None,
             "drift_severity": self.drift_severity,
             "justification": self.justification,
+            "previous_hash": self.previous_hash,
+            "record_hash": self.record_hash,
         }
         if self.metadata:
             d["metadata"] = self.metadata
@@ -129,6 +176,8 @@ class AuditRecord:
             drift_severity=d.get("drift_severity"),
             justification=d.get("justification", ""),
             metadata=d.get("metadata", {}),
+            previous_hash=d.get("previous_hash", ""),
+            record_hash=d.get("record_hash", ""),
         )
 
 
@@ -215,6 +264,39 @@ def build_justification(
 # ── AuditTrail ─────────────────────────────────────────────────────────────
 
 
+def verify_chain(records: list[AuditRecord]) -> tuple[bool, str]:
+    """Verify the hash chain integrity.
+
+    Records should be in chronological order (oldest first).
+    Returns (valid, error_message).
+    """
+    if not records:
+        return True, ""
+
+    for i, record in enumerate(records):
+        # Skip records without hash chain data (pre-upgrade)
+        if not record.record_hash:
+            continue
+
+        # Verify the previous_hash links
+        if i > 0 and records[i - 1].record_hash:
+            if record.previous_hash != records[i - 1].record_hash:
+                return False, (
+                    f"Chain broken at record {i} ({record.record_id}): "
+                    f"previous_hash mismatch"
+                )
+
+        # Verify the record's own hash
+        expected = record.compute_hash()
+        if record.record_hash != expected:
+            return False, (
+                f"Hash mismatch at record {i} ({record.record_id}): "
+                f"expected {expected[:16]}..., got {record.record_hash[:16]}..."
+            )
+
+    return True, ""
+
+
 class AuditTrail:
     """Append-only structured log of governance events.
 
@@ -228,16 +310,29 @@ class AuditTrail:
 
     The trail is capped at *max_records* to prevent unbounded memory
     growth.  When the cap is hit, oldest records are dropped.
+
+    Records are hash-chained: each record includes the SHA-256 hash of
+    the previous record, creating an immutable audit trail.
     """
 
     def __init__(self, max_records: int = 10000) -> None:
         self._records: list[AuditRecord] = []
         self._max_records = max_records
         self._lock = threading.Lock()
+        self._last_hash: str = ""
 
     def append(self, record: AuditRecord) -> None:
-        """Add a record to the trail.  Thread-safe."""
+        """Add a record to the trail.  Thread-safe.
+
+        Computes hash chain: sets previous_hash from the last record
+        and computes record_hash for the new record.
+        """
         with self._lock:
+            # Set hash chain fields
+            record.previous_hash = self._last_hash
+            record.record_hash = record.compute_hash()
+            self._last_hash = record.record_hash
+
             self._records.append(record)
             if len(self._records) > self._max_records:
                 self._records = self._records[-self._max_records:]
