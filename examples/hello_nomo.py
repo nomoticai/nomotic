@@ -35,13 +35,33 @@ from nomotic.store import MemoryCertificateStore
 
 # ── ANSI colors (with no-color fallback) ──────────────────────────────
 
-_NO_COLOR = not sys.stdout.isatty()
+import os
+import platform
+
+
+def _init_colors() -> bool:
+    """Initialize ANSI color support. Returns True if colors are available."""
+    if not sys.stdout.isatty():
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            # Enable ANSI escape sequences on Windows 10+
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            return True
+        except Exception:
+            return False
+    return True
+
+
+_COLORS_ENABLED = _init_colors()
 
 
 def _c(code: str, text: str) -> str:
-    if _NO_COLOR:
-        return text
-    return f"\033[{code}m{text}\033[0m"
+    return text if not _COLORS_ENABLED else f"\033[{code}m{text}\033[0m"
 
 
 def _bold(t: str) -> str:

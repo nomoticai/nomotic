@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,58 @@ from nomotic.store import FileCertificateStore
 __all__ = ["main"]
 
 _DEFAULT_BASE = Path.home() / ".nomotic"
+
+
+# ── ANSI color support ───────────────────────────────────────────────────
+
+
+def _init_colors() -> bool:
+    """Initialize ANSI color support. Returns True if colors are available."""
+    if not sys.stdout.isatty():
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            # Enable ANSI escape sequences on Windows 10+
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            return True
+        except Exception:
+            return False
+    return True
+
+
+_COLORS_ENABLED = _init_colors()
+
+
+def _c(code: str, text: str) -> str:
+    return text if not _COLORS_ENABLED else f"\033[{code}m{text}\033[0m"
+
+
+def _bold(t: str) -> str:
+    return _c("1", t)
+
+
+def _green(t: str) -> str:
+    return _c("32", t)
+
+
+def _red(t: str) -> str:
+    return _c("31", t)
+
+
+def _yellow(t: str) -> str:
+    return _c("33", t)
+
+
+def _cyan(t: str) -> str:
+    return _c("36", t)
+
+
+def _dim(t: str) -> str:
+    return _c("2", t)
 
 
 # ── Issuer key management ────────────────────────────────────────────────
@@ -116,6 +169,20 @@ def _cmd_birth(args: argparse.Namespace) -> None:
     ca, store = _build_ca(args.base_dir)
     zone_path = args.zone or "global"
     arch_reg, zone_val, _org_reg = _build_registries(args.base_dir)
+
+    # Check for duplicate agent-id
+    certs_dir = args.base_dir / "certs"
+    if certs_dir.exists():
+        for cert_file in certs_dir.glob("nmc-*.json"):
+            try:
+                data = json.loads(cert_file.read_text(encoding="utf-8"))
+                if data.get("agent_id") == args.agent_id and data.get("status") == "ACTIVE":
+                    print(f"Error: An active agent with id '{args.agent_id}' already exists.", file=sys.stderr)
+                    print(f"  Certificate: {data.get('certificate_id')}", file=sys.stderr)
+                    print(f"  Use a different --agent-id, or revoke the existing certificate first.", file=sys.stderr)
+                    sys.exit(1)
+            except (json.JSONDecodeError, KeyError):
+                continue
 
     # Validate archetype
     archetype = args.archetype
@@ -407,27 +474,6 @@ def _cmd_hello(args: argparse.Namespace) -> None:
     from nomotic.middleware import GatewayConfig, NomoticGateway
     from nomotic.sdk import GovernedAgent
     from nomotic.store import MemoryCertificateStore
-
-    # ANSI helpers
-    _no_color = not sys.stdout.isatty()
-
-    def _c(code: str, text: str) -> str:
-        return text if _no_color else f"\033[{code}m{text}\033[0m"
-
-    def _bold(t: str) -> str:
-        return _c("1", t)
-
-    def _green(t: str) -> str:
-        return _c("32", t)
-
-    def _red(t: str) -> str:
-        return _c("31", t)
-
-    def _yellow(t: str) -> str:
-        return _c("33", t)
-
-    def _cyan(t: str) -> str:
-        return _c("36", t)
 
     # Set up infrastructure
     print()
@@ -1180,17 +1226,6 @@ def _cmd_scope(args: argparse.Namespace) -> None:
 
 def _print_authority_envelope(agent_id: str, config: "AgentConfig") -> None:
     """Print the formatted authority envelope box."""
-    _no_color = not sys.stdout.isatty()
-
-    def _c(code: str, text: str) -> str:
-        return text if _no_color else f"\033[{code}m{text}\033[0m"
-
-    def _bold(t: str) -> str:
-        return _c("1", t)
-
-    def _green(t: str) -> str:
-        return _c("32", t)
-
     actions_str = "  ".join(config.actions) if config.actions else "(none)"
     boundaries = config.boundaries or []
 
@@ -1280,23 +1315,6 @@ def _cmd_config(args: argparse.Namespace) -> None:
     """Show the complete governance configuration for an agent."""
     from nomotic.sandbox import load_agent_config
 
-    _no_color = not sys.stdout.isatty()
-
-    def _c(code: str, text: str) -> str:
-        return text if _no_color else f"\033[{code}m{text}\033[0m"
-
-    def _bold(t: str) -> str:
-        return _c("1", t)
-
-    def _green(t: str) -> str:
-        return _c("32", t)
-
-    def _yellow(t: str) -> str:
-        return _c("33", t)
-
-    def _red(t: str) -> str:
-        return _c("31", t)
-
     agent_id = args.agent_id
 
     # Try to load certificate info
@@ -1382,26 +1400,6 @@ def _cmd_eval(args: argparse.Namespace) -> None:
         load_agent_config,
     )
 
-    _no_color = not sys.stdout.isatty()
-
-    def _c(code: str, text: str) -> str:
-        return text if _no_color else f"\033[{code}m{text}\033[0m"
-
-    def _bold(t: str) -> str:
-        return _c("1", t)
-
-    def _green(t: str) -> str:
-        return _c("32", t)
-
-    def _red(t: str) -> str:
-        return _c("31", t)
-
-    def _yellow(t: str) -> str:
-        return _c("33", t)
-
-    def _cyan(t: str) -> str:
-        return _c("36", t)
-
     from nomotic.sandbox import format_bar
     from nomotic.types import Action as GovAction, AgentContext as GovCtx, TrustProfile as GovTP, Verdict
 
@@ -1449,7 +1447,7 @@ def _cmd_eval(args: argparse.Namespace) -> None:
     print(_bold(_cyan("  GOVERNANCE EVALUATION")))
     print(_bold(_cyan("=" * 55)))
     print()
-    print(f"  Agent:   {agent_id}")
+    print(f"  Agent:   {agent_id} (trust: {initial_trust:.3f})")
     target_str = f" {chr(8594)} {target}" if target else ""
     print(f"  Action:  {action_type}{target_str}")
     if params:
@@ -1550,26 +1548,6 @@ def _cmd_simulate(args: argparse.Namespace) -> None:
     )
     from nomotic.scenarios import BUILTIN_SCENARIOS, generate_actions
     from nomotic.types import AgentContext as GovCtx, TrustProfile as GovTP, Verdict
-
-    _no_color = not sys.stdout.isatty()
-
-    def _c(code: str, text: str) -> str:
-        return text if _no_color else f"\033[{code}m{text}\033[0m"
-
-    def _bold(t: str) -> str:
-        return _c("1", t)
-
-    def _green(t: str) -> str:
-        return _c("32", t)
-
-    def _red(t: str) -> str:
-        return _c("31", t)
-
-    def _yellow(t: str) -> str:
-        return _c("33", t)
-
-    def _cyan(t: str) -> str:
-        return _c("36", t)
 
     agent_id = args.agent_id
     scenario_name = args.scenario
@@ -1740,8 +1718,8 @@ def _cmd_simulate(args: argparse.Namespace) -> None:
         ca.update_trust(cert.certificate_id, end_trust)
 
 
-def _cmd_playground(args: argparse.Namespace) -> None:
-    """Run the complete governance playground — the full developer journey."""
+def _cmd_tutorial(args: argparse.Namespace) -> None:
+    """Run the interactive governance tutorial — the full developer journey."""
     import time as _time
 
     from nomotic.monitor import DriftConfig as _DriftConfig
@@ -1757,29 +1735,7 @@ def _cmd_playground(args: argparse.Namespace) -> None:
     from nomotic.store import MemoryCertificateStore
     from nomotic.types import Action as GovAction, AgentContext as GovCtx, TrustProfile as GovTP, Verdict
 
-    _no_color = not sys.stdout.isatty()
-    interactive = sys.stdin.isatty() and not _no_color
-
-    def _c(code: str, text: str) -> str:
-        return text if _no_color else f"\033[{code}m{text}\033[0m"
-
-    def _bold(t: str) -> str:
-        return _c("1", t)
-
-    def _green(t: str) -> str:
-        return _c("32", t)
-
-    def _red(t: str) -> str:
-        return _c("31", t)
-
-    def _yellow(t: str) -> str:
-        return _c("33", t)
-
-    def _cyan(t: str) -> str:
-        return _c("36", t)
-
-    def _dim(t: str) -> str:
-        return _c("2", t)
+    interactive = sys.stdin.isatty() and _COLORS_ENABLED
 
     def _pause(msg: str = "Press Enter to continue...") -> None:
         if interactive:
@@ -1913,7 +1869,7 @@ def _cmd_playground(args: argparse.Namespace) -> None:
     v1 = runtime.evaluate(action1, ctx1)
     trust_after1 = runtime.get_trust_profile("claims-bot").overall_trust
 
-    _print_evaluation(v1, trust_before1, trust_after1, _c, _bold, _green, _red, _yellow, _cyan)
+    _print_evaluation(v1, trust_before1, trust_after1)
 
     _pause()
 
@@ -1926,7 +1882,7 @@ def _cmd_playground(args: argparse.Namespace) -> None:
     v2 = runtime.evaluate(action2, ctx2)
     trust_after2 = runtime.get_trust_profile("claims-bot").overall_trust
 
-    _print_evaluation(v2, trust_before2, trust_after2, _c, _bold, _green, _red, _yellow, _cyan)
+    _print_evaluation(v2, trust_before2, trust_after2)
     if v2.verdict == Verdict.DENY:
         print(f"  {_yellow(chr(9888))} Note: violations cost 5x more trust than successes earn.")
     print()
@@ -1947,7 +1903,7 @@ def _cmd_playground(args: argparse.Namespace) -> None:
     v3 = runtime.evaluate(action3, ctx3)
     trust_after3 = runtime.get_trust_profile("claims-bot").overall_trust
 
-    _print_evaluation(v3, trust_before3, trust_after3, _c, _bold, _green, _red, _yellow, _cyan)
+    _print_evaluation(v3, trust_before3, trust_after3)
 
     _pause()
 
@@ -1960,7 +1916,7 @@ def _cmd_playground(args: argparse.Namespace) -> None:
     v4 = runtime.evaluate(action4, ctx4)
     trust_after4 = runtime.get_trust_profile("claims-bot").overall_trust
 
-    _print_evaluation(v4, trust_before4, trust_after4, _c, _bold, _green, _red, _yellow, _cyan)
+    _print_evaluation(v4, trust_before4, trust_after4)
 
     print(f"  {_dim('What you learned: Every action goes through 13 dimensions.')}")
     print(f"  {_dim('Some dimensions can veto (instant denial).')}")
@@ -2306,7 +2262,7 @@ def _cmd_playground(args: argparse.Namespace) -> None:
         print()
 
     print(_bold(_cyan("=" * 60)))
-    print(_bold(_cyan("  Playground complete.")))
+    print(_bold(_cyan("  Tutorial complete.")))
     print(_bold(_cyan("=" * 60)))
     print()
     print(f"  You just saw the entire Nomotic governance lifecycle:")
@@ -2330,11 +2286,13 @@ def _print_evaluation(
     verdict: "GovernanceVerdict",
     trust_before: float,
     trust_after: float,
-    _c, _bold, _green, _red, _yellow, _cyan,
 ) -> None:
     """Print a formatted governance evaluation result."""
     from nomotic.sandbox import format_bar
     from nomotic.types import Verdict
+
+    print(f"  Trust:   {trust_before:.3f}")
+    print()
 
     for ds in verdict.dimension_scores:
         bar = format_bar(ds.score, 20)
@@ -2400,17 +2358,17 @@ def _print_evaluation(
 def _cmd_audit_show(args: argparse.Namespace) -> None:
     """Show audit records from an in-memory simulation or local eval sessions."""
     # This is a convenience alias that displays a help message
-    # pointing users to the playground or eval commands.
+    # pointing users to the tutorial or eval commands.
     print("The 'audit show' command works in two modes:")
     print()
-    print("  1. After 'nomotic playground' — audit records are shown as part")
+    print("  1. After 'nomotic tutorial' — audit records are shown as part")
     print("     of the interactive walkthrough (Chapter 6).")
     print()
     print("  2. Against a running API server:")
     print("     nomotic audit query --agent-id <agent> --host 127.0.0.1 --port 8420")
     print("     nomotic audit summary --agent-id <agent> --host 127.0.0.1 --port 8420")
     print()
-    print("  Run 'nomotic playground' for the full interactive experience.")
+    print("  Run 'nomotic tutorial' for the full interactive experience.")
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
@@ -2563,6 +2521,10 @@ def build_parser() -> argparse.ArgumentParser:
     config = sub.add_parser("config", help="Show governance configuration")
     config.add_argument("agent_id", help="Agent identifier")
 
+    # configure (alias for config)
+    configure = sub.add_parser("configure", help="Show governance configuration (alias for 'config')")
+    configure.add_argument("agent_id", help="Agent identifier")
+
     # ── eval ────────────────────────────────────────────────────────
     eval_parser = sub.add_parser("eval", help="Evaluate a single action through the governance pipeline")
     eval_parser.add_argument("agent_id", help="Agent identifier")
@@ -2577,8 +2539,8 @@ def build_parser() -> argparse.ArgumentParser:
     sim_parser.add_argument("--count", type=int, default=None, help="Override action count")
     sim_parser.add_argument("--description", default=None, help="Custom scenario description")
 
-    # ── playground ──────────────────────────────────────────────────
-    sub.add_parser("playground", help="Run the full interactive governance playground")
+    # ── tutorial ───────────────────────────────────────────────────
+    sub.add_parser("tutorial", help="Interactive walkthrough of the complete governance lifecycle")
 
     # ── serve ────────────────────────────────────────────────────────
     serve = sub.add_parser("serve", help="Start the Nomotic API server")
@@ -2675,9 +2637,10 @@ def main(argv: list[str] | None = None) -> None:
         "scope": _cmd_scope,
         "rule": _cmd_rule,
         "config": _cmd_config,
+        "configure": _cmd_config,
         "eval": _cmd_eval,
         "simulate": _cmd_simulate,
-        "playground": _cmd_playground,
+        "tutorial": _cmd_tutorial,
         "serve": _cmd_serve,
         "hello": _cmd_hello,
         "fingerprint": _cmd_fingerprint,
