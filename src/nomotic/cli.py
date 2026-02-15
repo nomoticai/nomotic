@@ -448,7 +448,7 @@ def _cmd_birth(args: argparse.Namespace) -> None:
     print()
     print("  Next steps:")
     print(f"    nomotic scope {args.name} set --actions read,write --boundaries my_db")
-    print(f"    nomotic eval {args.name} --action read --target my_db")
+    print(f"    nomotic test {args.name} --action read --target my_db")
 
 
 def _cmd_verify(args: argparse.Namespace) -> None:
@@ -1247,8 +1247,13 @@ def _audit_records(
         # --all mode: show records across all agents
         all_agents = audit_store.list_agents()
         if not all_agents:
-            print("  No audit records found.")
-            print("  Run 'nomotic eval <agent> ...' to generate records.")
+            print()
+            print(f"  {_bold('Audit Trail')}")
+            print("  No records found.")
+            print()
+            print("  Audit records are created automatically when actions are")
+            print("  evaluated through the Nomotic gateway or SDK.")
+            print()
             return
         print()
         print(f"  {_bold('Audit Trail: All Agents')}")
@@ -1267,8 +1272,16 @@ def _audit_records(
     records = audit_store.query(agent_id, limit=limit, severity=severity)
 
     if not records:
-        print(f"  No audit records found for '{agent_id}'.")
-        print(f"  Run 'nomotic eval {agent_id} ...' to generate records.")
+        print()
+        print(f"  {_bold(f'Audit Trail: {agent_id}')}")
+        print(f"  No records found.")
+        print()
+        print(f"  Audit records are created automatically when actions are")
+        print(f"  evaluated through the Nomotic gateway or SDK.")
+        print()
+        print(f"  To run test evaluations: nomotic test {agent_id} --action read --target my_db")
+        print(f"  To view test history:    nomotic testlog {agent_id}")
+        print()
         return
 
     print()
@@ -1279,15 +1292,16 @@ def _audit_records(
         _print_audit_record(r)
 
 
-def _print_audit_record(r: "PersistentAuditRecord") -> None:
-    """Print a single audit record."""
+def _print_audit_record(r: "PersistentLogRecord", show_source: bool = False) -> None:
+    """Print a single audit/log record."""
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
     ts = _dt.fromtimestamp(r.timestamp, tz=_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
     verdict_color = _green if r.verdict == "ALLOW" else (_red if r.verdict == "DENY" else _yellow)
+    source_tag = f" [{r.source}]" if show_source and hasattr(r, "source") and r.source else ""
 
-    print(f"  {r.record_id}  {ts}  {verdict_color(r.verdict)}")
+    print(f"  {r.record_id}  {ts}  {verdict_color(r.verdict)}{source_tag}")
     print(f"    Action: {r.action_type} \u2192 {r.action_target}")
     print(f"    UCS: {r.ucs:.2f}  Tier: {r.tier}  Trust: {r.trust_score:.3f} ({r.trust_trend})")
     if r.vetoed_by:
@@ -1404,6 +1418,146 @@ def _audit_verify(base_dir: Path, agent_id: str | None) -> None:
         chain_fail = f"\u2717 {message}"
         print(f"  Chain:   {_red(chain_fail)}")
     print()
+
+
+def _cmd_testlog(args: argparse.Namespace) -> None:
+    """View test evaluation history."""
+    identifier = getattr(args, "identifier", None)
+
+    if not identifier:
+        print("Specify an agent: nomotic testlog TestBot", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve agent name
+    try:
+        _numeric_id, resolved_name, _cert_id = _resolve_agent(args.base_dir, identifier)
+        agent_id = resolved_name
+    except SystemExit:
+        agent_id = identifier
+
+    if getattr(args, "clear", False):
+        _testlog_clear(args.base_dir, agent_id)
+        return
+
+    from nomotic.audit_store import LogStore
+
+    store = LogStore(args.base_dir, "testlog")
+
+    if getattr(args, "verify", False):
+        _testlog_verify(store, agent_id)
+    elif getattr(args, "summary", False):
+        _testlog_summary(store, agent_id)
+    else:
+        _testlog_records(store, agent_id, limit=getattr(args, "limit", 20))
+
+
+def _testlog_records(
+    store: "LogStore",
+    agent_id: str,
+    limit: int = 20,
+) -> None:
+    """Show recent test log records for an agent."""
+    records = store.query(agent_id, limit=limit)
+
+    if not records:
+        print()
+        print(f"  {_bold(f'Test Log: {agent_id}')}")
+        print(f"  No records found.")
+        print()
+        print(f"  Run test evaluations with:")
+        print(f"    nomotic test {agent_id} --action read --target my_db")
+        print()
+        return
+
+    print()
+    print(f"  {_bold(f'Test Log: {agent_id}')} (last {len(records)} records)")
+    print()
+
+    for r in records:
+        _print_audit_record(r, show_source=True)
+
+
+def _testlog_summary(store: "LogStore", agent_id: str) -> None:
+    """Show test log summary for an agent."""
+    summary = store.summary(agent_id)
+
+    if summary.get("total", 0) == 0:
+        print(f"  No test log records found for '{agent_id}'.")
+        return
+
+    total = summary["total"]
+    print()
+    print(f"  {_bold(f'Test Log Summary: {agent_id}')}")
+    print()
+    print(f"  Total evaluations: {total}")
+    print()
+
+    print(f"  By verdict:")
+    for v, count in sorted(summary["by_verdict"].items()):
+        pct = count / total * 100
+        color = _green if v == "ALLOW" else (_red if v == "DENY" else _yellow)
+        bar_len = int(count / total * 40)
+        bar = "\u2588" * bar_len
+        print(f"    {color(f'{v:10s}')} {count:5d}  {bar}  {pct:.1f}%")
+    print()
+
+    print(f"  Trust: {summary.get('trust_start', 0.5):.3f} \u2192 {summary.get('trust_end', 0.5):.3f}")
+    print()
+
+
+def _testlog_verify(store: "LogStore", agent_id: str) -> None:
+    """Verify hash chain integrity for an agent's test log."""
+    is_valid, count, message = store.verify_chain(agent_id)
+
+    print()
+    print(f"  {_bold(f'Test Log Chain: {agent_id}')}")
+    print()
+    print(f"  Records: {count}")
+
+    if count == 0:
+        print(f"  No records to verify.")
+        return
+
+    records = store.query_all(agent_id)
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    first_ts = _dt.fromtimestamp(records[0].timestamp, tz=_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    last_ts = _dt.fromtimestamp(records[-1].timestamp, tz=_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"  First:   {first_ts}  ({records[0].action_type} \u2192 {records[0].action_target}, {records[0].verdict})")
+    print(f"  Last:    {last_ts}  ({records[-1].action_type} \u2192 {records[-1].action_target}, {records[-1].verdict})")
+
+    if is_valid:
+        chain_ok = f"\u2713 All {count} records verified \u2014 no tampering detected"
+        print(f"  Chain:   {_green(chain_ok)}")
+        print(f"  Hash:    {records[-1].record_hash}")
+    else:
+        chain_fail = f"\u2717 {message}"
+        print(f"  Chain:   {_red(chain_fail)}")
+    print()
+
+
+def _testlog_clear(base_dir: Path, agent_id: str) -> None:
+    """Clear test history and reset simulated trust for an agent."""
+    testlog_dir = base_dir / "testlog"
+    safe_name = agent_id.lower()
+
+    log_file = testlog_dir / f"{safe_name}.jsonl"
+    trust_file = testlog_dir / f"{safe_name}.trust.json"
+
+    cleared = False
+    if log_file.exists():
+        log_file.unlink()
+        cleared = True
+    if trust_file.exists():
+        trust_file.unlink()
+        cleared = True
+
+    if cleared:
+        print(f"  Test history cleared for {agent_id}.")
+        print(f"  Simulated trust reset to production value.")
+    else:
+        print(f"  No test history found for {agent_id}.")
 
 
 def _cmd_provenance(args: argparse.Namespace) -> None:
@@ -1714,8 +1868,40 @@ def _cmd_config(args: argparse.Namespace) -> None:
     print()
 
 
-def _cmd_eval(args: argparse.Namespace) -> None:
-    """Evaluate a single action against the governance pipeline."""
+def _load_simulated_trust(base_dir: Path, agent_id: str, production_trust: float) -> float:
+    """Load simulated trust, resetting if stale (>1 hour old)."""
+    import time as _time
+
+    trust_file = base_dir / "testlog" / f"{agent_id.lower()}.trust.json"
+    if trust_file.exists():
+        try:
+            data = json.loads(trust_file.read_text(encoding="utf-8"))
+            age = _time.time() - data.get("last_updated", 0)
+            if age < 3600:  # 1 hour
+                return data.get("simulated_trust", production_trust)
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return production_trust
+
+
+def _save_simulated_trust(
+    base_dir: Path, agent_id: str, simulated: float, production: float,
+) -> None:
+    """Save simulated trust state."""
+    import time as _time
+
+    testlog_dir = base_dir / "testlog"
+    testlog_dir.mkdir(parents=True, exist_ok=True)
+    trust_file = testlog_dir / f"{agent_id.lower()}.trust.json"
+    trust_file.write_text(json.dumps({
+        "simulated_trust": simulated,
+        "production_trust_at_start": production,
+        "last_updated": _time.time(),
+    }, indent=2), encoding="utf-8")
+
+
+def _cmd_test(args: argparse.Namespace) -> None:
+    """Run a simulated governance evaluation. Does not affect production trust."""
     from nomotic.sandbox import (
         AgentConfig,
         build_sandbox_runtime,
@@ -1741,17 +1927,20 @@ def _cmd_eval(args: argparse.Namespace) -> None:
     if config is None:
         config = AgentConfig(agent_id=agent_id)
 
-    # Load certificate for trust
+    # Load certificate for production trust
     ca, _store = _build_ca(args.base_dir)
     from nomotic.sandbox import find_agent_cert_id
     cert_id = find_agent_cert_id(args.base_dir, agent_id)
     cert = ca.get(cert_id) if cert_id else None
-    initial_trust = cert.trust_score if cert else 0.5
+    production_trust = cert.trust_score if cert else 0.5
 
-    # Build runtime and evaluate
+    # Load simulated trust (or reset from production)
+    simulated_trust = _load_simulated_trust(args.base_dir, agent_id, production_trust)
+
+    # Build runtime and evaluate using simulated trust
     runtime = build_sandbox_runtime(agent_config=config, agent_id=agent_id)
     trust_profile = runtime.get_trust_profile(agent_id)
-    trust_profile.overall_trust = initial_trust
+    trust_profile.overall_trust = simulated_trust
 
     action = GovAction(
         agent_id=agent_id,
@@ -1763,13 +1952,21 @@ def _cmd_eval(args: argparse.Namespace) -> None:
 
     verdict = runtime.evaluate(action, ctx)
 
+    # Calculate simulated trust delta
+    new_simulated = runtime.get_trust_profile(agent_id).overall_trust
+    sim_delta = new_simulated - simulated_trust
+    new_simulated = round(max(0.0, min(1.0, new_simulated)), 3)
+
+    # Save simulated trust (do NOT touch production)
+    _save_simulated_trust(args.base_dir, agent_id, new_simulated, production_trust)
+
     # Display results
     print()
     print(_bold(_cyan("=" * 55)))
-    print(_bold(_cyan("  GOVERNANCE EVALUATION")))
+    print(_bold(_cyan("  TEST EVALUATION (simulated \u2014 does not affect production trust)")))
     print(_bold(_cyan("=" * 55)))
     print()
-    print(f"  Agent:   {agent_id} (trust: {initial_trust:.3f})")
+    print(f"  Agent:   {agent_id}")
     target_str = f" {chr(8594)} {target}" if target else ""
     print(f"  Action:  {action_type}{target_str}")
     if params:
@@ -1827,43 +2024,40 @@ def _cmd_eval(args: argparse.Namespace) -> None:
         print(f"  Reason:   {verdict.reasoning}")
     print(f"  Time:     {verdict.evaluation_time_ms:.1f}ms")
 
-    # Trust update
-    new_trust = runtime.get_trust_profile(agent_id).overall_trust
-    delta = new_trust - initial_trust
-    sign = "+" if delta >= 0 else ""
-    delta_color = _green if delta > 0 else (_red if delta < 0 else _yellow)
+    # Trust (Simulated)
+    sign = "+" if sim_delta >= 0 else ""
+    delta_color = _green if sim_delta > 0 else (_red if sim_delta < 0 else _yellow)
 
     trend = "stable"
-    if delta > 0.001:
+    if sim_delta > 0.001:
         trend = f"{chr(8599)} rising"
-    elif delta < -0.001:
+    elif sim_delta < -0.001:
         trend = f"{chr(8600)} falling"
 
     print()
-    print(f"  {_bold(chr(9472) * 2 + ' Trust Update ' + chr(9472) * 34)}")
+    print(f"  {_bold(chr(9472) * 2 + ' Trust (Simulated) ' + chr(9472) * 29)}")
     print()
-    print(f"  Before:   {initial_trust:.3f}")
-    print(f"  After:    {new_trust:.3f}  ({delta_color(f'{sign}{delta:.3f}')})")
-    print(f"  Trend:    {trend}")
+    print(f"  Production trust:  {production_trust:.3f} (unchanged)")
+    print(f"  Simulated:         {simulated_trust:.3f} {chr(8594)} {new_simulated:.3f}  ({delta_color(f'{sign}{sim_delta:.3f}')})")
+    print(f"  Trend:             {trend}")
 
-    if delta < -0.01:
-        ratio = abs(delta) / 0.01
+    if sim_delta < -0.01:
+        ratio = abs(sim_delta) / 0.01
         print()
         print(f"  {_yellow(chr(9888))} Note: violations cost 5x more trust than successes earn.")
         if ratio > 1:
             print(f"  This one denial erased ~{int(ratio)} successful actions.")
     print()
+    print(f"  {_yellow(chr(9888))} This is a test. Production trust is not affected.")
+    print(f"  Test history: nomotic testlog {agent_id}")
+    print()
 
-    # Update certificate trust if we have one
-    if cert is not None:
-        ca.update_trust(cert.certificate_id, new_trust)
-
-    # Persist audit record
+    # Persist to testlog (NOT audit)
     import time as _time
-    from nomotic.audit_store import AuditStore, PersistentAuditRecord
+    from nomotic.audit_store import LogStore, PersistentLogRecord
 
-    audit_store = AuditStore(args.base_dir)
-    previous_hash = audit_store.get_last_hash(agent_id)
+    test_store = LogStore(args.base_dir, "testlog")
+    previous_hash = test_store.get_last_hash(agent_id)
 
     dim_scores = {ds.dimension_name: ds.score for ds in verdict.dimension_scores}
     vetoed = list(verdict.vetoed_by) if verdict.vetoed_by else []
@@ -1877,21 +2071,22 @@ def _cmd_eval(args: argparse.Namespace) -> None:
         "verdict": verdict.verdict.name,
         "ucs": verdict.ucs,
         "tier": verdict.tier,
-        "trust_score": new_trust,
-        "trust_delta": delta,
+        "trust_score": new_simulated,
+        "trust_delta": sim_delta,
         "trust_trend": trend.replace("\u2197 ", "").replace("\u2198 ", ""),
         "severity": "alert" if verdict.verdict.name == "DENY" else "info",
         "justification": verdict.reasoning or "",
         "vetoed_by": vetoed,
         "dimension_scores": dim_scores,
         "parameters": params,
+        "source": "cli-test",
         "previous_hash": previous_hash,
         "record_hash": "",
     }
-    record_data["record_hash"] = audit_store.compute_hash(record_data, previous_hash)
+    record_data["record_hash"] = test_store.compute_hash(record_data, previous_hash)
 
-    audit_record = PersistentAuditRecord(**record_data)
-    audit_store.append(audit_record)
+    test_record = PersistentLogRecord(**record_data)
+    test_store.append(test_record)
 
 
 def _cmd_simulate(args: argparse.Namespace) -> None:
@@ -1993,6 +2188,7 @@ def _cmd_simulate(args: argparse.Namespace) -> None:
             "vetoed_by": vetoed,
             "dimension_scores": dim_scores,
             "parameters": dict(action.parameters) if action.parameters else {},
+            "source": "cli-simulate",
             "previous_hash": previous_hash,
             "record_hash": "",
         }
@@ -2840,7 +3036,7 @@ def _cmd_tutorial(args: argparse.Namespace) -> None:
     print(f"  Next steps:")
     print(f"    nomotic birth --agent-id my-agent --archetype customer-experience --org my-org")
     print(f"    nomotic scope set my-agent --actions read,write --boundaries my_db")
-    print(f"    nomotic eval my-agent --action read --target my_db")
+    print(f"    nomotic test my-agent --action read --target my_db")
     print(f"    nomotic simulate my-agent --scenario normal")
     print()
 
@@ -2919,9 +3115,9 @@ def _print_evaluation(
 
 
 def _cmd_audit_show(args: argparse.Namespace) -> None:
-    """Show audit records from an in-memory simulation or local eval sessions."""
+    """Show audit records from an in-memory simulation or local test sessions."""
     # This is a convenience alias that displays a help message
-    # pointing users to the tutorial or eval commands.
+    # pointing users to the tutorial or test commands.
     print("The 'audit show' command works in two modes:")
     print()
     print("  1. After 'nomotic tutorial' — audit records are shown as part")
@@ -2945,6 +3141,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
         archetype_registry=arch_reg,
         zone_validator=zone_val,
         org_registry=org_reg,
+        base_dir=args.base_dir,
         host=args.host,
         port=args.port,
     )
@@ -3102,8 +3299,15 @@ def build_parser() -> argparse.ArgumentParser:
     configure = sub.add_parser("configure", help="Show governance configuration (alias for 'config')")
     configure.add_argument("agent_id", help="Agent ID, name, or certificate ID")
 
-    # ── eval ────────────────────────────────────────────────────────
-    eval_parser = sub.add_parser("eval", help="Evaluate a single action through the governance pipeline")
+    # ── test (formerly eval) ──────────────────────────────────────────
+    test_parser = sub.add_parser("test", help="Test a governance decision (simulated \u2014 does not affect production trust)")
+    test_parser.add_argument("agent_id", help="Agent ID, name, or certificate ID")
+    test_parser.add_argument("--action", required=True, help="Action type to evaluate")
+    test_parser.add_argument("--target", default=None, help="Target resource")
+    test_parser.add_argument("--params", default=None, help="JSON parameters")
+
+    # Hidden alias for backward compatibility
+    eval_parser = sub.add_parser("eval", help=argparse.SUPPRESS)
     eval_parser.add_argument("agent_id", help="Agent ID, name, or certificate ID")
     eval_parser.add_argument("--action", required=True, help="Action type to evaluate")
     eval_parser.add_argument("--target", default=None, help="Target resource")
@@ -3115,6 +3319,16 @@ def build_parser() -> argparse.ArgumentParser:
     sim_parser.add_argument("--scenario", required=True, help="Scenario name (normal, drift, violations, mixed)")
     sim_parser.add_argument("--count", type=int, default=None, help="Override action count")
     sim_parser.add_argument("--description", default=None, help="Custom scenario description")
+
+    # ── testlog ─────────────────────────────────────────────────────
+    testlog_parser = sub.add_parser("testlog", help="View test evaluation history")
+    testlog_parser.add_argument("identifier", nargs="?", default=None,
+                                help="Agent name, ID, or certificate ID")
+    testlog_parser.add_argument("--summary", action="store_true", help="Show summary")
+    testlog_parser.add_argument("--verify", action="store_true", help="Verify hash chain")
+    testlog_parser.add_argument("--limit", type=int, default=20, help="Max records")
+    testlog_parser.add_argument("--clear", action="store_true",
+                                help="Clear test history and reset simulated trust")
 
     # ── tutorial ───────────────────────────────────────────────────
     sub.add_parser("tutorial", help="Interactive walkthrough of the complete governance lifecycle")
@@ -3212,7 +3426,8 @@ def main(argv: list[str] | None = None) -> None:
         "rule": _cmd_rule,
         "config": _cmd_config,
         "configure": _cmd_config,
-        "eval": _cmd_eval,
+        "test": _cmd_test,
+        "eval": _cmd_test,
         "simulate": _cmd_simulate,
         "tutorial": _cmd_tutorial,
         "serve": _cmd_serve,
@@ -3222,6 +3437,7 @@ def main(argv: list[str] | None = None) -> None:
         "alerts": _cmd_alerts,
         "trust": _cmd_trust,
         "audit": _cmd_audit,
+        "testlog": _cmd_testlog,
         "provenance": _cmd_provenance,
         "owner": _cmd_owner,
     }

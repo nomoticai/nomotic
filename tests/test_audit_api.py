@@ -59,6 +59,7 @@ def _seed_audit_records(
             "vetoed_by": [] if i < count - 1 else ["scope_compliance"],
             "dimension_scores": {"scope_compliance": 1.0},
             "parameters": {},
+            "source": "",
             "previous_hash": prev_hash,
             "record_hash": "",
         }
