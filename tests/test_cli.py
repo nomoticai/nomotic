@@ -71,6 +71,24 @@ class TestCLIArgParsing:
         assert args.zone is None
         assert args.owner is None
 
+    def test_birth_args_name_only(self):
+        """--name is the only required flag; archetype/org/zone are optional."""
+        parser = build_parser()
+        args = parser.parse_args([
+            "birth",
+            "--name", "my-agent",
+        ])
+        assert args.command == "birth"
+        assert args.name == "my-agent"
+        assert args.archetype is None
+        assert args.org is None
+        assert args.zone is None
+
+    def test_setup_args(self):
+        parser = build_parser()
+        args = parser.parse_args(["setup"])
+        assert args.command == "setup"
+
     def test_verify_args(self):
         parser = build_parser()
         args = parser.parse_args(["verify", "nmc-1234"])
@@ -319,3 +337,65 @@ class TestCLICommands:
             assert exc_info.value.code == 0
             captured = capsys.readouterr()
             assert "nomotic" in captured.out.lower() or "usage" in captured.out.lower()
+
+    def test_birth_with_config_defaults(self, capsys):
+        """Birth with just --name should use config defaults."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # Write a config file manually (simulates 'nomotic setup')
+            config = {
+                "organization": "acme-insurance",
+                "owner": "chris@acme.com",
+                "default_zone": "us/production",
+                "retention": "5y",
+                "enforce_unique_names": False,
+            }
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            main(["--base-dir", tmp, "birth", "--name", "ChrisBot"])
+            captured = capsys.readouterr()
+            assert "Agent created:" in captured.out
+            assert "ChrisBot" in captured.out
+            assert "acme-insurance" in captured.out
+            assert "chris@acme.com" in captured.out
+            assert "us/production" in captured.out
+            assert "general-purpose" in captured.out
+            assert "Archetype defaulted to 'general-purpose'." in captured.out
+
+    def test_birth_without_config_or_org_fails(self, capsys):
+        """Birth without config and without --org should fail."""
+        import pytest
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(SystemExit):
+                main(["--base-dir", tmp, "birth", "--name", "test-agent"])
+            captured = capsys.readouterr()
+            assert "not configured" in captured.err.lower() or "Run 'nomotic setup'" in captured.err
+
+    def test_birth_normalizes_inputs(self, capsys):
+        """Archetype, org, and zone should be lowercased automatically."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main([
+                "--base-dir", tmp,
+                "birth",
+                "--name", "test-agent",
+                "--archetype", "Customer-Experience",
+                "--org", "ACME",
+                "--zone", "Global",
+            ])
+            captured = capsys.readouterr()
+            assert "customer-experience" in captured.out
+            assert "acme" in captured.out
+            assert "global" in captured.out
+
+    def test_birth_next_steps_shown(self, capsys):
+        """Birth should show next steps."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main([
+                "--base-dir", tmp,
+                "birth",
+                "--name", "my-agent",
+                "--org", "org",
+            ])
+            captured = capsys.readouterr()
+            assert "Next steps:" in captured.out
+            assert "nomotic scope" in captured.out

@@ -2,7 +2,9 @@
 
 Usage::
 
-    nomotic birth --agent-id myagent --archetype customer-experience --org acme
+    nomotic setup
+    nomotic birth --name my-agent
+    nomotic birth --name my-agent --archetype customer-experience --org acme
     nomotic verify <cert-id>
     nomotic inspect <cert-id>
     nomotic suspend <cert-id> --reason "policy violation"
@@ -14,6 +16,7 @@ Usage::
     nomotic export <cert-id>
 
     nomotic archetype list [--category ...]
+    nomotic archetype set <agent>
     nomotic archetype register --name <name> --description <desc> --category <cat>
     nomotic archetype validate <name>
 
@@ -25,6 +28,7 @@ Usage::
 
     nomotic serve [--host 0.0.0.0] [--port 8420]
 
+Configuration is stored in ``~/.nomotic/config.json``.
 Certificates are stored in ``~/.nomotic/certs/``.
 The issuer key is stored in ``~/.nomotic/issuer/``.
 """
@@ -163,6 +167,17 @@ def _build_registries(base: Path) -> tuple[ArchetypeRegistry, ZoneValidator, Org
     return archetype_reg, zone_val, org_reg
 
 
+# ── Nomotic config (setup defaults) ─────────────────────────────────────
+
+
+def _load_nomotic_config(base: Path) -> dict:
+    """Load the nomotic config, or return empty dict if not set up."""
+    config_path = base / "config.json"
+    if config_path.exists():
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    return {}
+
+
 # ── Agent ID registry helpers ────────────────────────────────────────────
 
 
@@ -250,10 +265,78 @@ def _resolve_cert_id(base: Path, identifier: str) -> str:
 # ── CLI commands ─────────────────────────────────────────────────────────
 
 
+def _cmd_setup(args: argparse.Namespace) -> None:
+    """Interactive first-run configuration."""
+    config_path = args.base_dir / "config.json"
+
+    # Load existing config if present (for re-running setup)
+    existing = {}
+    if config_path.exists():
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+
+    print()
+    print(f"  {_bold('Nomotic Setup')}")
+    print(f"  {'─' * 35}")
+    print()
+
+    # Organization
+    default_org = existing.get("organization", "")
+    prompt = "  Organization name"
+    if default_org:
+        prompt += f" [{default_org}]"
+    prompt += ": "
+    org_input = input(prompt).strip() or default_org
+    org = org_input.lower().replace(" ", "-")
+    if org_input != org:
+        print(f"    \u2192 Normalized to: {org}")
+    print()
+
+    # Owner
+    default_owner = existing.get("owner", "")
+    prompt = "  Your name or email (agent owner)"
+    if default_owner:
+        prompt += f" [{default_owner}]"
+    prompt += ": "
+    owner = input(prompt).strip() or default_owner
+    print()
+
+    # Zone
+    default_zone = existing.get("default_zone", "global")
+    print("  Zones define where agents operate (e.g., global, us/production, eu/staging).")
+    prompt = f"  Default governance zone [{default_zone}]: "
+    zone_input = input(prompt).strip() or default_zone
+    zone = zone_input.lower()
+    if zone_input != zone:
+        print(f"    \u2192 Normalized to: {zone}")
+    print()
+
+    # Save
+    config = {
+        "organization": org,
+        "owner": owner,
+        "default_zone": zone,
+        "retention": existing.get("retention", "5y"),
+        "enforce_unique_names": existing.get("enforce_unique_names", False),
+    }
+    args.base_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    print(f"  {_green('Setup complete.')} Configuration saved to {config_path}")
+    print()
+    print("  Your defaults:")
+    print(f"    Organization: {org}")
+    print(f"    Owner:        {owner}")
+    print(f"    Zone:         {zone}")
+    print()
+    print(f"  You can change these anytime with 'nomotic setup' or edit {config_path}")
+    print()
+    print("  Next: Create your first agent with 'nomotic birth --name my-agent'")
+    print()
+
+
 def _cmd_birth(args: argparse.Namespace) -> None:
-    ca, store = _build_ca(args.base_dir)
-    zone_path = args.zone or "global"
-    arch_reg, zone_val, _org_reg = _build_registries(args.base_dir)
+    # Load config defaults
+    config = _load_nomotic_config(args.base_dir)
 
     # Resolve name from --name or --agent-id (backward compat)
     agent_name = args.name or getattr(args, "agent_id_compat", None)
@@ -262,20 +345,39 @@ def _cmd_birth(args: argparse.Namespace) -> None:
         sys.exit(1)
     args.name = agent_name
 
+    # Merge config defaults with CLI args
+    org_raw = args.org or config.get("organization", "")
+    owner = args.owner or config.get("owner", "")
+    zone_raw = args.zone or config.get("default_zone", "global")
+    archetype_raw = (args.archetype or "general-purpose")
+
+    # First-run guard: need at least an org
+    if not org_raw:
+        print("Nomotic is not configured yet.", file=sys.stderr)
+        print("  Run 'nomotic setup' first, or provide --org.", file=sys.stderr)
+        sys.exit(1)
+
+    # Auto-lowercase zone, org, archetype
+    org = org_raw.lower()
+    zone_path = zone_raw.lower()
+    archetype = archetype_raw.lower()
+
+    ca, store = _build_ca(args.base_dir)
+    arch_reg, zone_val, _org_reg = _build_registries(args.base_dir)
+
     # Load or create the AgentIdRegistry
     registry = _load_registry(args.base_dir)
 
     # Check for duplicate active name within the same org via registry
     existing = registry.list_all(status="ACTIVE")
     for entry in existing:
-        if entry["name"] == args.name and entry["organization"] == args.org:
-            print(f"Error: An active agent named '{args.name}' already exists in org '{args.org}'.", file=sys.stderr)
+        if entry["name"] == args.name and entry["organization"] == org:
+            print(f"Error: An active agent named '{args.name}' already exists in org '{org}'.", file=sys.stderr)
             print(f"  ID: {entry['agent_id']}, Certificate: {entry['certificate_id']}", file=sys.stderr)
             print(f"  Use a different --name, or revoke the existing agent first.", file=sys.stderr)
             sys.exit(1)
 
     # Validate archetype
-    archetype = args.archetype
     arch_result = arch_reg.validate(archetype)
     if not arch_result.valid:
         msg = f"Invalid archetype '{archetype}': {'; '.join(arch_result.errors)}"
@@ -289,11 +391,12 @@ def _cmd_birth(args: argparse.Namespace) -> None:
         if arch_result.suggestion:
             print(f"  Did you mean '{arch_result.suggestion}'?", file=sys.stderr)
 
-    # Validate zone
-    zone_path = args.zone or "global"
+    # Validate zone (after normalization)
     zone_result = zone_val.validate(zone_path)
     if not zone_result.valid:
-        print(f"Invalid zone path '{zone_path}': {'; '.join(zone_result.errors)}", file=sys.stderr)
+        error = zone_result.errors[0] if zone_result.errors else "Invalid zone format"
+        print(f"Invalid zone '{zone_path}': {error}", file=sys.stderr)
+        print("  Zones use lowercase with slashes: global, us/production, eu/staging", file=sys.stderr)
         sys.exit(1)
 
     # Allocate sequential numeric ID
@@ -302,9 +405,9 @@ def _cmd_birth(args: argparse.Namespace) -> None:
     cert, agent_sk = ca.issue(
         agent_id=args.name,
         archetype=archetype,
-        organization=args.org,
+        organization=org,
         zone_path=zone_path,
-        owner=args.owner or "",
+        owner=owner,
     )
 
     # Set numeric ID on certificate and re-save
@@ -312,23 +415,36 @@ def _cmd_birth(args: argparse.Namespace) -> None:
     store.update(cert)
 
     # Register in the ID registry
-    registry.register(numeric_id, args.name, cert.certificate_id, args.org)
+    registry.register(numeric_id, args.name, cert.certificate_id, org)
 
     # Save agent keys alongside certificate
     store.save_agent_key(cert.certificate_id, agent_sk.to_bytes())
     store.save_agent_pub(cert.certificate_id, cert.public_key)
 
     print()
-    print("Agent created:")
-    print(f"  ID:          {numeric_id}")
+    print(f"Agent created: {_bold(args.name)}")
+    if cert.agent_numeric_id:
+        print(f"  ID:          {cert.agent_numeric_id}")
     print(f"  Name:        {cert.agent_id}")
     print(f"  Certificate: {cert.certificate_id}")
-    print(f"  Owner:       {cert.owner}")
-    print(f"  Archetype:   {cert.archetype}")
-    print(f"  Org:         {cert.organization}")
-    print(f"  Zone:        {cert.zone_path}")
+    print(f"  Archetype:   {archetype}")
+    print(f"  Org:         {org}")
+    print(f"  Zone:        {zone_path}")
+    print(f"  Owner:       {owner}")
     print(f"  Trust:       {cert.trust_score:.2f}")
     print(f"  Status:      {cert.status.name}")
+
+    # Prompt to set archetype if they didn't specify one
+    if not args.archetype:
+        print()
+        print("  Archetype defaulted to 'general-purpose'.")
+        print(f"  Set a specific archetype with: nomotic archetype set {args.name}")
+
+    # Next steps
+    print()
+    print("  Next steps:")
+    print(f"    nomotic scope {args.name} set --actions read,write --boundaries my_db")
+    print(f"    nomotic eval {args.name} --action read --target my_db")
 
 
 def _cmd_verify(args: argparse.Namespace) -> None:
@@ -679,9 +795,72 @@ def _cmd_archetype(args: argparse.Namespace) -> None:
                 print(f"  Did you mean '{result.suggestion}'?")
             sys.exit(1)
 
+    elif sub == "set":
+        _cmd_archetype_set(args)
+
     else:
         print("Unknown archetype subcommand", file=sys.stderr)
         sys.exit(1)
+
+
+def _cmd_archetype_set(args: argparse.Namespace) -> None:
+    """Interactive archetype selection for an agent."""
+    agent_identifier = args.agent_identifier
+
+    # Resolve agent
+    _numeric_id, _name, cert_id = _resolve_agent(args.base_dir, agent_identifier)
+
+    arch_reg = ArchetypeRegistry.with_defaults()
+    archetypes = arch_reg.list()
+
+    # Group by category
+    by_category: dict[str, list] = {}
+    for a in archetypes:
+        cat = a.category or "uncategorized"
+        by_category.setdefault(cat, []).append(a)
+
+    # Display numbered list
+    print()
+    print(f"  Select an archetype for {_bold(agent_identifier)}:")
+    print()
+
+    numbered = []
+    idx = 1
+    for cat in sorted(by_category.keys()):
+        print(f"  {_bold(cat)}")
+        for a in sorted(by_category[cat], key=lambda x: x.name):
+            print(f"    {idx:2d}. {a.name:28s} {a.description}")
+            numbered.append(a)
+            idx += 1
+        print()
+
+    # Get selection
+    while True:
+        choice = input("  Enter number (or 'skip' to keep current): ").strip()
+        if choice.lower() == "skip":
+            print("  Archetype unchanged.")
+            return
+        try:
+            num = int(choice)
+            if 1 <= num <= len(numbered):
+                selected = numbered[num - 1]
+                break
+            print(f"  Please enter a number between 1 and {len(numbered)}.")
+        except ValueError:
+            print("  Please enter a number or 'skip'.")
+
+    # Update the certificate's archetype
+    ca, store = _build_ca(args.base_dir)
+    cert = ca.get(cert_id)
+    if cert is None:
+        print("Certificate not found.", file=sys.stderr)
+        sys.exit(1)
+
+    cert.archetype = selected.name
+    store.update(cert)
+
+    print(f"  Archetype set to '{_green(selected.name)}' for {agent_identifier}.")
+    print()
 
 
 # ── Organization commands ────────────────────────────────────────────────
@@ -2521,14 +2700,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
 
+    # setup
+    sub.add_parser("setup", help="Configure Nomotic defaults (organization, owner, zone)")
+
     # birth
-    birth = sub.add_parser("birth", help="Issue a new agent certificate")
-    birth.add_argument("--name", default=None, help="Human-readable agent name")
+    birth = sub.add_parser("birth", help="Create a new agent")
+    birth.add_argument("--name", default=None, help="Agent name")
     birth.add_argument("--agent-id", dest="agent_id_compat", default=None, help=argparse.SUPPRESS)
-    birth.add_argument("--owner", default=None, help="Accountable owner of the agent")
-    birth.add_argument("--archetype", required=True, help="Behavioral archetype")
-    birth.add_argument("--org", required=True, help="Organization")
-    birth.add_argument("--zone", default=None, help="Governance zone path")
+    birth.add_argument("--archetype", default=None, help="Behavioral archetype (optional, can be set later)")
+    birth.add_argument("--org", default=None, help="Organization (default: from setup config)")
+    birth.add_argument("--zone", default=None, help="Governance zone (default: from setup config)")
+    birth.add_argument("--owner", default=None, help="Agent owner (default: from setup config)")
 
     # verify
     verify = sub.add_parser("verify", help="Verify a certificate")
@@ -2588,6 +2770,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     arch_val = arch_sub.add_parser("validate", help="Validate an archetype name")
     arch_val.add_argument("name", help="Archetype name to validate")
+
+    arch_set = arch_sub.add_parser("set", help="Set archetype for an agent (interactive)")
+    arch_set.add_argument("agent_identifier", help="Agent name, ID, or certificate ID")
 
     # ── org subcommands ──────────────────────────────────────────────
     org = sub.add_parser("org", help="Manage organizations")
@@ -2741,6 +2926,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     commands = {
+        "setup": _cmd_setup,
         "birth": _cmd_birth,
         "verify": _cmd_verify,
         "inspect": _cmd_inspect,
