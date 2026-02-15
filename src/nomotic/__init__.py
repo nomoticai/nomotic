@@ -32,6 +32,7 @@ from nomotic.registry import (
     ZoneValidator,
 )
 from nomotic.sdk import GovernedAgent, GovernedResponse, CertificateLoadError, GovernedRequestError
+from nomotic.executor import GovernedToolExecutor, ExecutionResult
 from nomotic.middleware import NomoticGateway, GatewayConfig, GatewayResult
 from nomotic.fingerprint import BehavioralFingerprint, TemporalPattern
 from nomotic.priors import ArchetypePrior, TemporalProfile, PriorRegistry
@@ -190,6 +191,8 @@ __all__ = [
     "GovernedResponse",
     "CertificateLoadError",
     "GovernedRequestError",
+    "GovernedToolExecutor",
+    "ExecutionResult",
     "NomoticGateway",
     "GatewayConfig",
     "GatewayResult",
